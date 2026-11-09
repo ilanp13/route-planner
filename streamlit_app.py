@@ -6,7 +6,6 @@ import time
 import io
 import folium
 from streamlit_folium import st_folium
-from sklearn.cluster import KMeans
 from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
@@ -42,7 +41,7 @@ TRANSLATIONS = {
         "err_no_file": "אנא העלה קובץ כתובות והזן כתובת יעד סופי.",
         "status_geocoding": "ממיר כתובות לקואורדינטות...",
         "status_stops": "שולף תחנות אוטובוס...",
-        "status_clustering": "בוחר תחנות אידיאליות ומשייך נוסעים...",
+        "status_clustering": "מחלק לקווים באופן מאוזן ומשייך נוסעים...",
         "status_routing": "מחשב מסלולי נסיעה אופטימליים...",
         "done": "החישוב הסתיים בהצלחה!",
         "map_title": "מפת קווים, תחנות וקווי הליכה",
@@ -92,7 +91,7 @@ TRANSLATIONS = {
         "err_no_file": "Please upload an address file and enter a destination address.",
         "status_geocoding": "Geocoding addresses...",
         "status_stops": "Fetching bus stops...",
-        "status_clustering": "Selecting optimal stops...",
+        "status_clustering": "Balancing routes and assigning passengers...",
         "status_routing": "Computing optimal vehicle routes...",
         "done": "Calculation completed successfully!",
         "map_title": "Routes, Stops & Walking Paths Map",
@@ -479,9 +478,18 @@ if app_mode == T["mode_admin"] and st.sidebar.button(T["run_btn"], type="primary
 
             status.update(label=T["status_routing"])
             actual_k = min(int(num_routes), len(selected_stops))
+            
+            # --- חלוקה מאוזנת בקפידה (Balanced Split) למניעת קו בודד ---
             if actual_k > 1 and len(selected_stops) >= actual_k:
-                kmeans = KMeans(n_clusters=actual_k, random_state=42, n_init=20)
-                selected_stops["route_id"] = kmeans.fit_predict(selected_stops[["lat", "lon"]].values)
+                # מיון התחנות לפי קו רוחב/אורך כדי לחלק אותן שווה בשווה בצורה מרחבית או שוויונית
+                sorted_indices = np.argsort(selected_stops["lat"].values)
+                cluster_labels = np.zeros(len(selected_stops), dtype=int)
+                chunk_size = int(np.ceil(len(selected_stops) / actual_k))
+                for r_idx in range(actual_k):
+                    start_i = r_idx * chunk_size
+                    end_i = min((r_idx + 1) * chunk_size, len(selected_stops))
+                    cluster_labels[sorted_indices[start_i:end_i]] = r_idx
+                selected_stops["route_id"] = cluster_labels
             else:
                 selected_stops["route_id"] = np.arange(len(selected_stops)) % actual_k
 
