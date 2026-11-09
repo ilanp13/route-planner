@@ -366,7 +366,83 @@ def walking_matrix(p_coords, s_coords, max_walk_m, gmaps_key="", min_candidates=
     return mat
 
 
+def _osrm_table(pts):
+    locs = ";".join(f"{lon},{lat}" for lat, lon in pts)
+    try:
+        res = requests.get(f"https://router.project-osrm.org/table/v1/driving/{locs}",
+                           params={"annotations": "distance"}, timeout=20).json()
+    except (requests.RequestException, ValueError):
+        return None
+    if res.get("code") != "Ok":
+        return None
+    m = np.array(res["distances"], dtype=float)
+    return None if np.isnan(m).any() else m
+
+
+def _google_drive_block(origins, dests, key):
+    r = requests.post(
+        "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+        headers={"X-Goog-Api-Key": key,
+                 "X-Goog-FieldMask": "originIndex,destinationIndex,distanceMeters,condition"},
+        json={"origins": [_wp(*o) for o in origins],
+              # sideOfRoad: arrive on the stop's side, so no U-turn to reach the far-side stop
+              "destinations": [{"waypoint": {**_wp(*d)["waypoint"], "sideOfRoad": True}} for d in dests],
+              "travelMode": "DRIVE"},
+        timeout=30,
+    )
+    out = np.full((len(origins), len(dests)), np.nan)
+    if r.ok:
+        for el in r.json():
+            if el.get("condition") == "ROUTE_EXISTS" and "distanceMeters" in el:
+                out[el.get("originIndex", 0), el.get("destinationIndex", 0)] = el["distanceMeters"]
+    return out
+
+
+def driving_matrix(pts, gmaps_key="", road_factor=1.4):
+    """Square road-distance matrix (meters, asymmetric). Google Routes (25x25
+    blocks) → OSRM table → air distance x road_factor, filling gaps per cell."""
+    pts = [tuple(map(float, p)) for p in pts]
+    fallback = haversine_matrix(pts, pts) * road_factor
+    m = np.full_like(fallback, np.nan)
+    if gmaps_key:
+        for i in range(0, len(pts), 25):
+            for j in range(0, len(pts), 25):
+                try:
+                    m[i:i + 25, j:j + 25] = _google_drive_block(pts[i:i + 25], pts[j:j + 25], gmaps_key)
+                except (requests.RequestException, ValueError):
+                    pass
+    if np.isnan(m).any() and len(pts) <= 100:
+        osrm = _osrm_table(pts)
+        if osrm is not None:
+            m = np.where(np.isnan(m), osrm, m)
+    m = np.where(np.isnan(m), fallback, m)
+    np.fill_diagonal(m, 0)
+    return m
+
+
 # ---------------------------------------------------------------- stop selection
+
+def _prune_stops(walk_mat, selected, max_walk_m):
+    """Drop a stop when everyone it serves still has another selected stop within
+    max_walk (or no farther than today, for people already over the limit).
+    Least-used stops go first, so close-together stops merge into one."""
+    selected = list(selected)
+    changed = True
+    while changed and len(selected) > 1:
+        changed = False
+        sub = walk_mat[:, selected]
+        nearest = np.argmin(sub, axis=1)
+        current = sub[np.arange(len(sub)), nearest]
+        for j in np.argsort(np.bincount(nearest, minlength=len(selected)), kind="stable"):
+            served = nearest == j
+            others = [k for k in range(len(selected)) if k != j]
+            alt = sub[served][:, others].min(axis=1) if served.any() else np.array([])
+            if np.all(alt <= np.maximum(max_walk_m, current[served])):
+                selected.pop(j)
+                changed = True
+                break
+    return selected
+
 
 def select_optimal_stops(passengers_df, bus_stops_df, walk_mat, max_walk_m):
     """Greedy set cover over walking distance, then each passenger goes to the
@@ -401,6 +477,7 @@ def select_optimal_stops(passengers_df, bus_stops_df, walk_mat, max_walk_m):
         if s not in selected:
             selected.append(s)
 
+    selected = _prune_stops(walk_mat, selected, max_walk_m)
     sub = walk_mat[:, selected]
     nearest = np.argmin(sub, axis=1)
     dists = sub[np.arange(len(sub)), nearest]
@@ -420,7 +497,7 @@ def select_optimal_stops(passengers_df, bus_stops_df, walk_mat, max_walk_m):
 
 # ---------------------------------------------------------------- routing
 
-def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limit_s=3):
+def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limit_s=3, dist_matrix=None):
     """Multi-vehicle routing: each bus starts at origin (or anywhere, if None),
     visits a subset of stops and ends at dest. Balances route lengths via a span
     cost so a single bus doesn't take everything. Returns a list of stop-index
@@ -431,7 +508,9 @@ def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limi
     k = max(1, min(int(num_routes), n))
     dest_i, start_i = n, n + 1
     pts = list(stops) + [dest] + [origin if origin else dest]
-    dist = np.round(haversine_matrix(pts, pts)).astype(int)
+    # dist_matrix: road distances over [stops..., dest, start]; air distance otherwise.
+    dist = np.round(np.asarray(dist_matrix, float) if dist_matrix is not None
+                    else haversine_matrix(pts, pts)).astype(np.int64)
     if origin is None:
         dist[start_i, :] = 0  # free start next to the first stop
     dist[:, start_i] = 10**7  # never return to start
@@ -483,7 +562,7 @@ def get_road_geometry(coords_list, gmaps_key=""):
                 "https://routes.googleapis.com/directions/v2:computeRoutes",
                 headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
                 json={"origin": _wp(*coords_list[0])["waypoint"], "destination": _wp(*coords_list[-1])["waypoint"],
-                      "intermediates": [_wp(*c)["waypoint"] for c in coords_list[1:-1]],
+                      "intermediates": [{**_wp(*c)["waypoint"], "sideOfRoad": True} for c in coords_list[1:-1]],
                       "travelMode": "DRIVE"},
                 timeout=15,
             )

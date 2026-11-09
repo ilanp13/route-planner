@@ -104,6 +104,11 @@ def get_stops(bbox, key, lang):
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
+def cached_drive(pts, key):
+    return rc.driving_matrix(pts, key)
+
+
+@st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
 def cached_walk(p_coords, s_coords, max_walk, key):
     return rc.walking_matrix(p_coords, s_coords, max_walk, key)
 
@@ -167,8 +172,9 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
         stop_xy = list(zip(sel.lat, sel.lon))
         dest_xy = (dest["lat"], dest["lon"])
         origin_xy = (origin["lat"], origin["lon"]) if origin else None
+        drive = cached_drive(tuple(stop_xy) + (dest_xy, origin_xy or dest_xy), GMAPS_KEY)
         routes_idx = rc.solve_vrp(stop_xy, dest_xy, origin_xy, num_routes,
-                                  sel["passengers_count"].tolist(), capacity or None)
+                                  sel["passengers_count"].tolist(), capacity or None, dist_matrix=drive)
         if routes_idx is None:
             st.error(T["err_capacity"])
             return None

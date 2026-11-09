@@ -153,3 +153,38 @@ def test_street_variants_cover_common_israeli_spellings():
     assert "שדרות דואני 10" in rc.street_variants("שד דואני 10")
     assert "יהודה הלוי 21" in rc.street_variants("רבי יהודה הלוי 21")
     assert rc.street_variants("הצדף 18")[0] == "הצדף 18"
+
+
+# ---------- v2: driving matrix + stop pruning ----------
+
+def test_select_stops_prunes_redundant_stop():
+    # Greedy picks C first (covers p2,p3 with the smallest sum), then needs A for p0
+    # and B for p1 — after which C is redundant: p2 can walk to A, p3 to B.
+    passengers = pd.DataFrame({"lat": [0] * 4, "lon": [0] * 4, "address": list("abcd")})
+    stops = pd.DataFrame({"stop_id": list("ABC"), "name": list("ABC"), "lat": [0] * 3, "lon": [0] * 3})
+    walk = np.array([[100, 900, 900],
+                     [900, 100, 900],
+                     [300, 900, 10],
+                     [900, 300, 10]], float)
+    sel, p = rc.select_optimal_stops(passengers, stops, walk, max_walk_m=350)
+    assert sorted(sel["name"]) == ["A", "B"]
+    assert p["walk_distance_m"].max() <= 350
+
+
+def test_solve_vrp_uses_given_distance_matrix():
+    # Air distance says 0->1->2, but the road matrix makes 0->2->1 far cheaper.
+    stops = [(0.0, 0.001), (0.0, 0.002), (0.0, 0.003)]
+    n = 3
+    big = 10_000
+    m = np.full((n + 2, n + 2), big)
+    np.fill_diagonal(m, 0)
+    m[4, 0] = 1; m[0, 2] = 1; m[2, 1] = 1; m[1, 3] = 1  # start(4)->0->2->1->dest(3)
+    routes = rc.solve_vrp(stops, (0.0, 0.0), (0.0, 0.004), 1, [1, 1, 1], dist_matrix=m)
+    assert routes == [[0, 2, 1]]
+
+
+def test_driving_matrix_falls_back_to_scaled_air(monkeypatch):
+    monkeypatch.setattr(rc, "_osrm_table", lambda pts: None)
+    pts = [(0.0, 0.0), (0.0, 0.01)]
+    m = rc.driving_matrix(pts, gmaps_key="")
+    assert m.shape == (2, 2) and m[0, 1] > rc.haversine_matrix(pts, pts)[0, 1]
