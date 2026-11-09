@@ -1,0 +1,8 @@
+streamlit
+pandas
+openpyxl
+requests
+folium
+streamlit-folium
+scikit-learn
+ortools
