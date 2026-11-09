@@ -37,6 +37,9 @@ def auth_configured():
 
 
 GMAPS_KEY = str(get_setting("GOOGLE_MAPS_API_KEY")).strip()
+# The tiles key is sent to every viewer's browser, so it must be a separate key
+# restricted to the Map Tiles API + this app's URL. Never fall back to GMAPS_KEY.
+TILES_KEY = str(get_setting("GOOGLE_MAPS_TILES_KEY") or "").strip()
 EDITORS = [e for e in ms.parse_emails(get_setting("EDITOR_EMAILS")) if e != ms.PUBLIC]
 DEV_MODE = os.environ.get("ROUTE_PLANNER_DEV") == "1"
 store = ms.MapStore(get_setting("MAPS_DIR", "data/maps"))
@@ -101,6 +104,21 @@ def get_stops(bbox, key, lang):
         return cached_stops(bbox, key, lang)
     except LookupError:
         return pd.DataFrame(columns=rc.STOP_COLS), []
+
+
+@st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
+def cached_walk_path(home, stop, key):
+    return rc.walking_path(home, stop, key)
+
+
+@st.cache_data(show_spinner=False, ttl=24 * 3600)  # sessions last ~2 weeks
+def cached_tile_session(key, lang, referer):
+    return rc.google_tile_session(key, lang, referer)
+
+
+def app_base_url():
+    base = get_setting("APP_URL") or getattr(st.context, "url", "") or ""
+    return base.split("?")[0].rstrip("/") + "/" if base else ""
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
@@ -192,11 +210,14 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
             routes[r_id] = nodes
             geometry[r_id] = rc.get_road_geometry([(n["lat"], n["lon"]) for n in nodes], GMAPS_KEY)
         passengers["route_id"] = sel["route_id"].values[passengers["assigned_stop_idx"]]
+        walk_paths = [cached_walk_path((p.lat, p.lon), (sel.at[p.assigned_stop_idx, "lat"], sel.at[p.assigned_stop_idx, "lon"]),
+                                       GMAPS_KEY) for p in passengers.itertuples()]
 
         status.update(label=T["done"], state="complete", expanded=False)
     return {"passengers_df": passengers, "selected_stops": sel, "routes": routes, "routes_geometry": geometry,
             "dest_coords": dest_xy, "origin_coords": origin_xy, "failed_addrs": failed,
-            "stop_sources": stop_sources, "city": city, "used_google": bool(GMAPS_KEY)}
+            "stop_sources": stop_sources, "city": city, "used_google": bool(GMAPS_KEY),
+            "walk_paths": walk_paths}
 
 
 # ------------------------------------------------------------------ rendering
@@ -247,7 +268,13 @@ def render_results(res):
 
     st.subheader(T["map_title"])
     pts = p_df[["lat", "lon"]].values.tolist() + [list(res["dest_coords"])]
-    m = folium.Map(control_scale=True)
+    session = cached_tile_session(TILES_KEY, lang_code, app_base_url()) if TILES_KEY else None
+    m = folium.Map(control_scale=True, tiles=None)
+    if session:
+        folium.TileLayer(
+            tiles=f"https://tile.googleapis.com/v1/2dtiles/{{z}}/{{x}}/{{y}}?session={session}&key={TILES_KEY}",
+            attr="Map data ©Google", name="Google", max_zoom=22).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
     m.fit_bounds([[min(p[0] for p in pts), min(p[1] for p in pts)], [max(p[0] for p in pts), max(p[1] for p in pts)]])
 
     for r_num, geom in r_geom.items():
@@ -261,11 +288,12 @@ def render_results(res):
                                 popup=folium.Popup(f"<b>{T['route_name']} {r_num} (#{i + 1})</b><br>{n['name']}<br>👥 {n['passengers']}",
                                                    max_width=250)).add_to(m)
 
-    for _, p in p_df.iterrows():
+    walk_paths = res.get("walk_paths") or [None] * len(p_df)  # maps saved before this have none
+    for (_, p), path in zip(p_df.iterrows(), walk_paths):
         stop = s_df.loc[p["assigned_stop_idx"]]
         color = color_for(p["route_id"])
-        folium.PolyLine([(p["lat"], p["lon"]), (stop["lat"], stop["lon"])], color=color, weight=2,
-                        dash_array="4, 4", opacity=0.8).add_to(m)
+        line = path or [(p["lat"], p["lon"]), (stop["lat"], stop["lon"])]
+        folium.PolyLine(line, color=color, weight=2, dash_array="4, 4", opacity=0.8).add_to(m)
         folium.CircleMarker([p["lat"], p["lon"]], radius=4, color="#f59e0b" if p["over_max_walk"] else color,
                             fill=True, fill_color=color, fill_opacity=0.9,
                             tooltip=f"{p['name']} - {p['address']} ({T['route_name']} {p['route_id']}, "
@@ -274,6 +302,7 @@ def render_results(res):
     folium.Marker(res["dest_coords"], tooltip=T["dest_label"], icon=folium.Icon(color="black", icon="flag")).add_to(m)
     if res["origin_coords"]:
         folium.Marker(res["origin_coords"], tooltip=T["origin_label"], icon=folium.Icon(color="green", icon="play")).add_to(m)
+    folium.LayerControl(position="topleft").add_to(m)
     st_folium(m, width=None, height=540, returned_objects=[])
 
     tab1, tab2, tab3 = st.tabs([T["tab_outbound"], T["tab_inbound"], T["tab_passengers"]])

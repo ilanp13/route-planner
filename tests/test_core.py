@@ -188,3 +188,44 @@ def test_driving_matrix_falls_back_to_scaled_air(monkeypatch):
     pts = [(0.0, 0.0), (0.0, 0.01)]
     m = rc.driving_matrix(pts, gmaps_key="")
     assert m.shape == (2, 2) and m[0, 1] > rc.haversine_matrix(pts, pts)[0, 1]
+
+
+# ---------- v3: walking paths + google tiles ----------
+
+class _Resp:
+    def __init__(self, payload, ok=True):
+        self._p, self.ok = payload, ok
+
+    def json(self):
+        return self._p
+
+
+def test_walking_path_decodes_google_polyline(monkeypatch):
+    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp(
+        {"routes": [{"polyline": {"encodedPolyline": "_p~iF~ps|U_ulLnnqC"}}]}))
+    path = rc.walking_path((38.5, -120.2), (40.7, -120.95), "k")
+    assert path[0] == (38.5, -120.2) and path[-1] == (40.7, -120.95)
+
+
+def test_walking_path_without_key_or_on_error_is_none(monkeypatch):
+    assert rc.walking_path((0, 0), (0, 1), "") is None
+    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp({}, ok=False))
+    assert rc.walking_path((0, 0), (0, 1), "k") is None
+
+
+def test_google_tile_session(monkeypatch):
+    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp({"session": "S1"}))
+    assert rc.google_tile_session("k", "he") == "S1"
+    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp({}, ok=False))
+    assert rc.google_tile_session("k", "he") is None
+
+
+def test_google_tile_session_sends_referer(monkeypatch):
+    seen = {}
+
+    def fake(*a, **k):
+        seen.update(k.get("headers") or {})
+        return _Resp({"session": "S"})
+    monkeypatch.setattr(rc.requests, "post", fake)
+    rc.google_tile_session("k", "he", referer="https://app.example/")
+    assert seen.get("Referer") == "https://app.example/"

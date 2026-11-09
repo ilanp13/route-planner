@@ -587,3 +587,35 @@ def search_passengers(df, query):
     q = query.strip()
     return df[df["name"].astype(str).str.contains(q, case=False, regex=False, na=False)
               | df["address"].astype(str).str.contains(q, case=False, regex=False, na=False)]
+
+
+def walking_path(home, stop, gmaps_key):
+    """Actual walking route home→stop as [(lat, lon), ...], or None."""
+    if not gmaps_key:
+        return None
+    try:
+        r = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
+            json={"origin": _wp(*home)["waypoint"], "destination": _wp(*stop)["waypoint"], "travelMode": "WALK"},
+            timeout=15,
+        )
+        if r.ok and r.json().get("routes"):
+            return decode_polyline(r.json()["routes"][0]["polyline"]["encodedPolyline"])
+    except (requests.RequestException, ValueError, KeyError):
+        pass
+    return None
+
+
+def google_tile_session(gmaps_key, lang="he", referer=None):
+    """Session token for Google Map Tiles API (2D roadmap); None if unavailable.
+    referer: the app's URL — needed when the key is restricted to that website."""
+    try:
+        r = requests.post("https://tile.googleapis.com/v1/createSession", params={"key": gmaps_key},
+                          headers={"Referer": referer} if referer else None,
+                          json={"mapType": "roadmap", "language": f"{lang}-IL", "region": "IL"}, timeout=10)
+        if r.ok:
+            return r.json().get("session")
+    except (requests.RequestException, ValueError):
+        pass
+    return None
