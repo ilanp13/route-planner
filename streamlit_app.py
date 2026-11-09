@@ -17,35 +17,45 @@ TRANSLATIONS = {
         "dir": "rtl",
         "align": "right",
         "title": "🚌 מערכת אופטימיזציית קווי איסוף ותחנות אוטובוס",
-        "subtitle": "העלה קובץ כתובות מגורים, והמערכת תאתר תחנות אוטובוס קרובות, תבחר את התחנות האידיאליות ותבנה מסלולי נסיעה יעילים (הלוך וחזור).",
-        "settings": "הגדרות מסלול",
-        "api_key_input": "Google Maps API Key (אופציונלי אם הוגדר ב-Secrets)",
+        "subtitle": "ניהול, תכנון ושיתוף קווי איסוף לתלמידים/נוסעים (הלוך וחזור).",
+        "settings": "הגדרות מערכת",
+        "mode_select": "בחר מצב תצוגה",
+        "mode_admin": "🔧 מצב מנהל (העלאה וחישוב מחדש)",
+        "mode_viewer": "👀 מצב צפייה ושיתוף (למשתמשים / הורים)",
+        "search_label": "🔍 חפש לפי שם ילד או כתובת מגורים...",
+        "search_results_title": "תוצאות חיפוש אישיות:",
+        "my_route": "קו משויך:",
+        "my_stop": "תחנת איסוף:",
+        "my_walk": "מרחק הליכה מהבית:",
+        "api_key_input": "Google Maps API Key (אופציונלי)",
         "api_active": "✅ מחובר ל-Google Maps API",
-        "api_fallback": "ℹ️ עובד במצב חינמי (OSM/OSRM). הזן מפתח Google לדיוק מירבי.",
+        "api_fallback": "ℹ️ עובד במצב חינמי (OSM/OSRM).",
         "upload": "העלה קובץ כתובות (Excel או CSV)",
-        "select_col": "בחר את העמודה שמכילה את כתובות המגורים",
-        "city_hint": "עיר ברירת מחדל (תתווסף אוטומטית לכתובות ללא עיר)",
+        "select_col": "בחר עמודת כתובות מגורים",
+        "select_name_col": "בחר עמודת שמות הילדים/נוסעים (אופציונלי)",
+        "city_hint": "עיר ברירת מחדל",
         "dest_input": "כתובת יעד סופי (חובה)",
-        "origin_input": "כתובת תחנת מוצא (אופציונלי - אם ריק, יתחיל מהתחנה הראשונה)",
+        "origin_input": "כתובת תחנת מוצא (אופציונלי)",
         "num_routes": "מספר קווי נסיעה",
         "max_walk": "מרחק הליכה מקסימלי מהבית לתחנה (מטרים)",
         "run_btn": "חשב מסלולים אופטימליים 🚀",
         "err_no_file": "אנא העלה קובץ כתובות והזן כתובת יעד סופי.",
-        "status_geocoding": "ממיר כתובות לקואורדינטות (Geocoding)...",
-        "status_stops": "שולף תחנות אוטובוס קיימות באזור...",
+        "status_geocoding": "ממיר כתובות לקואורדינטות...",
+        "status_stops": "שולף תחנות אוטובוס...",
         "status_clustering": "בוחר תחנות אידיאליות ומשייך נוסעים...",
         "status_routing": "מחשב מסלולי נסיעה אופטימליים...",
         "done": "החישוב הסתיים בהצלחה!",
-        "map_title": "מפת קווים, תחנות ונוסעים",
-        "tab_outbound": "מסלולי הלוך (לכיוון היעד)",
-        "tab_inbound": "מסלולי חזור (מהיעד לפיזור)",
-        "tab_passengers": "שיוך נוסעים לתחנות",
+        "map_title": "מפת קווים, תחנות וקווי הליכה",
+        "tab_outbound": "מסלולי הלוך",
+        "tab_inbound": "מסלולי חזור",
+        "tab_passengers": "טבלת שיוך מלאה",
         "route_name": "קו",
         "download_btn": "📥 הורד תוכנית קווים ושיוך נוסעים (Excel)",
         "col_stop_order": "סדר תחנה",
         "col_stop_name": "שם תחנה / מיקום",
-        "col_passengers_count": "מספר נוסעים עולים/יורדים",
+        "col_passengers_count": "מספר נוסעים",
         "col_address": "כתובת מגורים",
+        "col_name": "שם הילד/נוסע",
         "col_assigned_stop": "תחנה משויכת",
         "col_walk_dist": "מרחק הליכה (מ')",
         "col_route": "קו משויך",
@@ -57,35 +67,45 @@ TRANSLATIONS = {
         "dir": "ltr",
         "align": "left",
         "title": "🚌 Bus Stop & Route Optimization System",
-        "subtitle": "Upload residential addresses to automatically locate nearby bus stops, select optimal stops, and generate efficient outbound & inbound routes.",
-        "settings": "Route Settings",
-        "api_key_input": "Google Maps API Key (Optional if set in Secrets)",
+        "subtitle": "Management and sharing portal for passenger/student pickup routes.",
+        "settings": "System Settings",
+        "mode_select": "Select View Mode",
+        "mode_admin": "🔧 Admin Mode (Upload & Compute)",
+        "mode_viewer": "👀 Viewer Mode (For Parents / Users)",
+        "search_label": "🔍 Search by passenger name or address...",
+        "search_results_title": "Personal Search Result:",
+        "my_route": "Assigned Route:",
+        "my_stop": "Assigned Bus Stop:",
+        "my_walk": "Walking Distance from Home:",
+        "api_key_input": "Google Maps API Key (Optional)",
         "api_active": "✅ Connected to Google Maps API",
-        "api_fallback": "ℹ️ Using free OSM/OSRM mode. Provide Google Key for max accuracy.",
+        "api_fallback": "ℹ️ Using free OSM/OSRM mode.",
         "upload": "Upload Addresses File (Excel or CSV)",
-        "select_col": "Select the column containing residential addresses",
-        "city_hint": "Default City (appended if missing from address)",
+        "select_col": "Select residential address column",
+        "select_name_col": "Select passenger name column (Optional)",
+        "city_hint": "Default City",
         "dest_input": "Final Destination Address (Required)",
-        "origin_input": "Origin Station Address (Optional - leaves from first stop if empty)",
+        "origin_input": "Origin Station Address (Optional)",
         "num_routes": "Number of Routes",
-        "max_walk": "Max walking distance from home to stop (meters)",
+        "max_walk": "Max walking distance to stop (meters)",
         "run_btn": "Calculate Optimal Routes 🚀",
         "err_no_file": "Please upload an address file and enter a destination address.",
         "status_geocoding": "Geocoding addresses...",
-        "status_stops": "Fetching active bus stops in the area...",
-        "status_clustering": "Selecting optimal stops and assigning passengers...",
+        "status_stops": "Fetching bus stops...",
+        "status_clustering": "Selecting optimal stops...",
         "status_routing": "Computing optimal vehicle routes...",
         "done": "Calculation completed successfully!",
-        "map_title": "Routes, Selected Stops & Passengers Map",
-        "tab_outbound": "Outbound Routes (To Destination)",
-        "tab_inbound": "Inbound Routes (Return Drop-off)",
-        "tab_passengers": "Passenger Stop Assignments",
+        "map_title": "Routes, Stops & Walking Paths Map",
+        "tab_outbound": "Outbound Routes",
+        "tab_inbound": "Inbound Routes",
+        "tab_passengers": "Full Passenger Assignments",
         "route_name": "Route",
         "download_btn": "📥 Download Full Route Plan (Excel)",
         "col_stop_order": "Stop Order",
         "col_stop_name": "Stop Name / Location",
         "col_passengers_count": "Passengers Count",
         "col_address": "Residential Address",
+        "col_name": "Passenger Name",
         "col_assigned_stop": "Assigned Bus Stop",
         "col_walk_dist": "Walking Distance (m)",
         "col_route": "Assigned Route",
@@ -363,35 +383,42 @@ st.write(T["subtitle"])
 
 with st.sidebar:
     st.header(T["settings"])
-    if secret_api_key:
-        active_api_key = secret_api_key
-        st.success(T["api_active"])
-    else:
-        user_key = st.text_input(T["api_key_input"], type="password")
-        active_api_key = user_key.strip()
-        if active_api_key:
+    app_mode = st.radio(T["mode_select"], [T["mode_viewer"], T["mode_admin"]])
+
+    if app_mode == T["mode_admin"]:
+        if secret_api_key:
+            active_api_key = secret_api_key
             st.success(T["api_active"])
         else:
-            st.info(T["api_fallback"])
+            user_key = st.text_input(T["api_key_input"], type="password")
+            active_api_key = user_key.strip()
+            if active_api_key:
+                st.success(T["api_active"])
+            else:
+                st.info(T["api_fallback"])
 
-    uploaded_file = st.file_uploader(T["upload"], type=["xlsx", "xls", "csv"])
-    city_hint = st.text_input(T["city_hint"], value="")
-    dest_address = st.text_input(T["dest_input"], value="")
-    origin_address = st.text_input(T["origin_input"], value="")
-    num_routes = st.number_input(T["num_routes"], min_value=1, max_value=10, value=2, step=1)
-    max_walk = st.slider(T["max_walk"], min_value=100, max_value=1000, value=350, step=50)
+        uploaded_file = st.file_uploader(T["upload"], type=["xlsx", "xls", "csv"])
+        city_hint = st.text_input(T["city_hint"], value="")
+        dest_address = st.text_input(T["dest_input"], value="")
+        origin_address = st.text_input(T["origin_input"], value="")
+        num_routes = st.number_input(T["num_routes"], min_value=1, max_value=10, value=2, step=1)
+        max_walk = st.slider(T["max_walk"], min_value=100, max_value=1000, value=350, step=50)
 
 df_input = None
 address_col = None
+name_col = None
 
-if uploaded_file is not None:
+if app_mode == T["mode_admin"] and uploaded_file is not None:
     if uploaded_file.name.endswith(".csv"):
         df_input = pd.read_csv(uploaded_file)
     else:
         df_input = pd.read_excel(uploaded_file)
     address_col = st.sidebar.selectbox(T["select_col"], options=df_input.columns.tolist())
+    name_cols_opt = ["-- None --"] + df_input.columns.tolist()
+    name_col_choice = st.sidebar.selectbox(T["select_name_col"], options=name_cols_opt)
+    name_col = name_col_choice if name_col_choice != "-- None --" else None
 
-if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
+if app_mode == T["mode_admin"] and st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
     if df_input is None or not dest_address.strip():
         st.error(T["err_no_file"])
     else:
@@ -407,6 +434,11 @@ if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
             )
 
             raw_addresses = df_input[address_col].dropna().astype(str).tolist()
+            raw_names = (
+                df_input[name_col].dropna().astype(str).tolist()
+                if name_col else [f"Passenger {i+1}" for i in range(len(raw_addresses))]
+            )
+
             unique_addrs = list(dict.fromkeys(raw_addresses))
             addr_to_coords = {}
             failed_addrs = []
@@ -422,10 +454,15 @@ if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
                 if not active_api_key:
                     time.sleep(0.35)
 
-            valid_rows = [
-                {"address": addr, "lat": addr_to_coords[addr][0], "lon": addr_to_coords[addr][1]}
-                for addr in raw_addresses if addr in addr_to_coords
-            ]
+            valid_rows = []
+            for idx, addr in enumerate(raw_addresses):
+                if addr in addr_to_coords:
+                    valid_rows.append({
+                        "name": raw_names[idx] if idx < len(raw_names) else f"Passenger {idx+1}",
+                        "address": addr,
+                        "lat": addr_to_coords[addr][0],
+                        "lon": addr_to_coords[addr][1]
+                    })
             passengers_df = pd.DataFrame(valid_rows)
 
             if passengers_df.empty:
@@ -442,20 +479,21 @@ if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
 
             status.update(label=T["status_routing"])
             actual_k = min(int(num_routes), len(selected_stops))
-            if actual_k > 1:
-                kmeans = KMeans(n_clusters=actual_k, random_state=42, n_init=10)
+            if actual_k > 1 and len(selected_stops) >= actual_k:
+                kmeans = KMeans(n_clusters=actual_k, random_state=42, n_init=20)
                 selected_stops["route_id"] = kmeans.fit_predict(selected_stops[["lat", "lon"]].values)
             else:
-                selected_stops["route_id"] = 0
+                selected_stops["route_id"] = np.arange(len(selected_stops)) % actual_k
 
             stop_to_route = selected_stops["route_id"].to_dict()
             passengers_df["route_id"] = passengers_df["assigned_stop_idx"].map(stop_to_route) + 1
+            selected_stops["route_id"] = selected_stops["route_id"] + 1
 
             routes_outbound = {}
             routes_inbound = {}
             routes_geometry = {}
 
-            for r_id in range(actual_k):
+            for r_id in range(1, actual_k + 1):
                 r_stops = selected_stops[selected_stops["route_id"] == r_id].copy().reset_index(drop=True)
                 nodes = []
                 if origin_coords:
@@ -483,7 +521,7 @@ if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
                 ordered_indices = solve_tsp_open_or_fixed(coords_list, has_fixed_start=(origin_coords is not None))
                 ordered_nodes = [nodes[idx] for idx in ordered_indices]
 
-                routes_outbound[r_id + 1] = pd.DataFrame([
+                routes_outbound[r_id] = pd.DataFrame([
                     {
                         T["col_stop_order"]: idx + 1,
                         T["col_stop_name"]: n["name"],
@@ -494,7 +532,7 @@ if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
                     for idx, n in enumerate(ordered_nodes)
                 ])
 
-                routes_inbound[r_id + 1] = pd.DataFrame([
+                routes_inbound[r_id] = pd.DataFrame([
                     {
                         T["col_stop_order"]: idx + 1,
                         T["col_stop_name"]: n["name"],
@@ -506,7 +544,7 @@ if st.sidebar.button(T["run_btn"], type="primary", use_container_width=True):
                 ])
 
                 ordered_coords = [(n["lat"], n["lon"]) for n in ordered_nodes]
-                routes_geometry[r_id + 1] = get_road_geometry(ordered_coords, active_api_key)
+                routes_geometry[r_id] = get_road_geometry(ordered_coords, active_api_key)
 
             st.session_state["results"] = {
                 "passengers_df": passengers_df,
@@ -528,6 +566,29 @@ if "results" in st.session_state:
     r_in = res["routes_inbound"]
     r_geom = res["routes_geometry"]
 
+    # --- אזור חיפוש אישי למשתמשים/הורים ---
+    st.markdown("---")
+    search_query = st.text_input(T["search_label"], value="")
+    if search_query.strip():
+        matched = p_df[
+            p_df["name"].str.contains(search_query, case=False, na=False) |
+            p_df["address"].str.contains(search_query, case=False, na=False)
+        ]
+        if not matched.empty:
+            st.success(T["search_results_title"])
+            for _, row in matched.iterrows():
+                r_num = int(row["route_id"])
+                st.info(
+                    f"👤 **{row['name']}** | 🏠 {row['address']} <br>"
+                    f"🚌 **{T['my_route']}** קו {r_num} | "
+                    f"🚏 **{T['my_stop']}** {row['assigned_stop_name']} | "
+                    f"🚶‍♂️ **{T['my_walk']}** {row['walk_distance_m']} מטר",
+                    icon="📍"
+                )
+        else:
+            st.warning("לא נמצאו תוצאות תואמות לחיפוש.")
+    st.markdown("---")
+
     if res["failed_addrs"]:
         st.warning(f"{T['unassigned_warn']} {', '.join(res['failed_addrs'])}")
 
@@ -536,10 +597,10 @@ if "results" in st.session_state:
     center_lon = p_df["lon"].mean()
     m = folium.Map(location=[center_lat, center_lon], zoom_start=13, control_scale=True)
 
-    colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"]
+    route_colors = {1: "#2563eb", 2: "#dc2626", 3: "#16a34a", 4: "#9333ea", 5: "#ea580c", 6: "#0891b2"}
 
     for r_num, geom in r_geom.items():
-        color = colors[(r_num - 1) % len(colors)]
+        color = route_colors.get(r_num, "#334155")
         folium.PolyLine(
             geom, color=color, weight=5, opacity=0.85,
             tooltip=f"{T['route_name']} {r_num}"
@@ -549,7 +610,7 @@ if "results" in st.session_state:
         for _, stop_row in df_route.iterrows():
             folium.CircleMarker(
                 location=[stop_row["lat"], stop_row["lon"]],
-                radius=8,
+                radius=9,
                 color=color,
                 fill=True,
                 fill_color="#ffffff",
@@ -559,14 +620,18 @@ if "results" in st.session_state:
 
     for _, p_row in p_df.iterrows():
         stop_row = s_df.loc[p_row["assigned_stop_idx"]]
+        r_num = int(stop_row["route_id"])
+        line_color = route_colors.get(r_num, "#64748b")
+
         folium.PolyLine(
             [(p_row["lat"], p_row["lon"]), (stop_row["lat"], stop_row["lon"])],
-            color="#64748b", weight=1.5, dash_array="5, 5", opacity=0.7
+            color=line_color, weight=2, dash_array="4, 4", opacity=0.8
         ).add_to(m)
+        
         folium.CircleMarker(
             location=[p_row["lat"], p_row["lon"]],
-            radius=4, color="#334155", fill=True, fill_opacity=0.9,
-            tooltip=f"{p_row['address']} ({p_row['walk_distance_m']}m)"
+            radius=4, color=line_color, fill=True, fill_color=line_color, fill_opacity=0.9,
+            tooltip=f"{p_row['name']} - {p_row['address']} ({T['route_name']} {r_num}, הליכה: {p_row['walk_distance_m']}m)"
         ).add_to(m)
 
     folium.Marker(
@@ -582,7 +647,7 @@ if "results" in st.session_state:
             icon=folium.Icon(color="green", icon="play")
         ).add_to(m)
 
-    st_folium(m, width=None, height=520, returned_objects=[])
+    st_folium(m, width=None, height=540, returned_objects=[])
 
     tab1, tab2, tab3 = st.tabs([T["tab_outbound"], T["tab_inbound"], T["tab_passengers"]])
 
@@ -602,6 +667,7 @@ if "results" in st.session_state:
 
     with tab3:
         display_p_df = pd.DataFrame({
+            T["col_name"]: p_df["name"],
             T["col_address"]: p_df["address"],
             T["col_route"]: p_df["route_id"].map(lambda x: f"{T['route_name']} {x}"),
             T["col_assigned_stop"]: p_df["assigned_stop_name"],
@@ -627,3 +693,6 @@ if "results" in st.session_state:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
+else:
+    if app_mode == T["mode_viewer"]:
+        st.info("👋 ברוכים הבאים! האפליקציה במצב צפייה. אם טרם חושבו מסלולים, המנהל צריך להעלות את קובץ הכתובות פעם אחת במצב מנהל.")
