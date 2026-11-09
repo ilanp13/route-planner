@@ -64,6 +64,73 @@ def decode_polyline(polyline_str):
     return coords
 
 
+def encode_polyline(coords):
+    out, plat, plng = [], 0, 0
+    for lat, lng in coords:
+        for v, prev in ((round(lat * 1e5), plat), (round(lng * 1e5), plng)):
+            d = v - prev
+            d = ~(d << 1) if d < 0 else d << 1
+            while d >= 0x20:
+                out.append(chr((0x20 | (d & 0x1F)) + 63))
+                d >>= 5
+            out.append(chr(d + 63))
+        plat, plng = round(lat * 1e5), round(lng * 1e5)
+    return "".join(out)
+
+
+def bearing(a, b):
+    """Initial compass bearing a→b in degrees [0, 360)."""
+    la1, la2 = math.radians(a[0]), math.radians(b[0])
+    dl = math.radians(b[1] - a[1])
+    x = math.sin(dl) * math.cos(la2)
+    y = math.cos(la1) * math.sin(la2) - math.sin(la1) * math.cos(la2) * math.cos(dl)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def _angle_diff(a, b):
+    return abs((a - b + 180) % 360 - 180)
+
+
+def count_uturns(path, step_m=5, chord_m=30, loop_m=150, near_m=15):
+    """Count places where the bus turns back the way it came: it passes within
+    near_m of an earlier point after at most loop_m of driving, and its heading
+    (over chord_m) leaving is ≥150° from its heading arriving there. This counts
+    U-turns and round-the-roundabout-and-back, but not left turns at roundabouts
+    or ordinary corners."""
+    pts = np.asarray([tuple(p) for p in path], float)
+    if len(pts) < 2:
+        return 0
+    seg = np.sqrt(((np.diff(pts[:, 0]) * 111_320) ** 2) +
+                  ((np.diff(pts[:, 1]) * 111_320 * np.cos(np.radians(pts[:-1, 0]))) ** 2))
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    if cum[-1] < 2 * chord_m:
+        return 0
+    d = np.arange(0, cum[-1], step_m)
+    S = np.column_stack([np.interp(d, cum, pts[:, 0]), np.interp(d, cum, pts[:, 1])])
+    k = int(chord_m / step_m)
+    n = len(S)
+    xy = np.column_stack([S[:, 0] * 111_320, S[:, 1] * 111_320 * np.cos(np.radians(S[:, 0]))])
+    head = np.full(n, np.nan)       # heading arriving at i (from i-k)
+    lead = np.full(n, np.nan)       # heading leaving i (to i+k)
+    v = xy[k:] - xy[:-k]
+    ang = (np.degrees(np.arctan2(v[:, 0], v[:, 1])) + 360) % 360
+    head[k:] = ang
+    lead[:-k] = ang
+    count, i, span = 0, k, int(loop_m / step_m)
+    while i < n - k:
+        hit = None
+        for j in range(i + k, min(i + span, n - k)):  # come back after ≥ chord_m of driving
+            if np.hypot(*(xy[j] - xy[i])) <= near_m and _angle_diff(head[i], lead[j]) >= 150:
+                hit = j
+                break
+        if hit is not None:
+            count += 1
+            i = hit + 2 * k
+        else:
+            i += 1
+    return count
+
+
 # ---------------------------------------------------------------- input
 
 def read_table(raw: bytes, filename: str) -> pd.DataFrame:
@@ -366,11 +433,14 @@ def walking_matrix(p_coords, s_coords, max_walk_m, gmaps_key="", min_candidates=
     return mat
 
 
-def _osrm_table(pts):
+def _osrm_table(pts, curb=False):
     locs = ";".join(f"{lon},{lat}" for lat, lon in pts)
+    params = {"annotations": "distance"}
+    if curb:  # arrive with the stop on the bus's right (Israel drives on the right)
+        params["approaches"] = ";".join(["curb"] * len(pts))
     try:
         res = requests.get(f"https://router.project-osrm.org/table/v1/driving/{locs}",
-                           params={"annotations": "distance"}, timeout=20).json()
+                           params=params, timeout=30).json()
     except (requests.RequestException, ValueError):
         return None
     if res.get("code") != "Ok":
@@ -379,12 +449,21 @@ def _osrm_table(pts):
     return None if np.isnan(m).any() else m
 
 
-def _google_drive_block(origins, dests, key):
+def _origin_wp(o, heading=None):
+    w = _wp(*o)
+    if heading is not None:
+        # bus leaves the stop facing the way it arrived — turning back must be driven
+        w["waypoint"]["location"]["heading"] = int(round(heading)) % 360
+    return w
+
+
+def _google_drive_block(origins, dests, key, origin_headings=None):
+    hs = origin_headings or [None] * len(origins)
     r = requests.post(
         "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
         headers={"X-Goog-Api-Key": key,
                  "X-Goog-FieldMask": "originIndex,destinationIndex,distanceMeters,condition"},
-        json={"origins": [_wp(*o) for o in origins],
+        json={"origins": [_origin_wp(o, h) for o, h in zip(origins, hs)],
               # sideOfRoad: arrive on the stop's side, so no U-turn to reach the far-side stop
               "destinations": [{"waypoint": {**_wp(*d)["waypoint"], "sideOfRoad": True}} for d in dests],
               "travelMode": "DRIVE"},
@@ -398,21 +477,23 @@ def _google_drive_block(origins, dests, key):
     return out
 
 
-def driving_matrix(pts, gmaps_key="", road_factor=1.4):
+def driving_matrix(pts, gmaps_key="", road_factor=1.4, headings=None, free_only=False):
     """Square road-distance matrix (meters, asymmetric). Google Routes (25x25
     blocks) → OSRM table → air distance x road_factor, filling gaps per cell."""
     pts = [tuple(map(float, p)) for p in pts]
     fallback = haversine_matrix(pts, pts) * road_factor
     m = np.full_like(fallback, np.nan)
-    if gmaps_key:
+    if gmaps_key and not free_only:
         for i in range(0, len(pts), 25):
             for j in range(0, len(pts), 25):
                 try:
-                    m[i:i + 25, j:j + 25] = _google_drive_block(pts[i:i + 25], pts[j:j + 25], gmaps_key)
+                    m[i:i + 25, j:j + 25] = _google_drive_block(
+                        pts[i:i + 25], pts[j:j + 25], gmaps_key,
+                        headings[i:i + 25] if headings is not None else None)
                 except (requests.RequestException, ValueError):
                     pass
     if np.isnan(m).any() and len(pts) <= 100:
-        osrm = _osrm_table(pts)
+        osrm = _osrm_table(pts, curb=True)
         if osrm is not None:
             m = np.where(np.isnan(m), osrm, m)
     m = np.where(np.isnan(m), fallback, m)
@@ -497,7 +578,8 @@ def select_optimal_stops(passengers_df, bus_stops_df, walk_mat, max_walk_m):
 
 # ---------------------------------------------------------------- routing
 
-def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limit_s=3, dist_matrix=None):
+def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limit_s=3, dist_matrix=None,
+              balance=100):
     """Multi-vehicle routing: each bus starts at origin (or anywhere, if None),
     visits a subset of stops and ends at dest. Balances route lengths via a span
     cost so a single bus doesn't take everything. Returns a list of stop-index
@@ -525,8 +607,9 @@ def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limi
     cb = routing.RegisterTransitCallback(cost)
     routing.SetArcCostEvaluatorOfAllVehicles(cb)
     routing.AddDimension(cb, 0, 10**8, True, "Distance")
-    if k > 1:
-        routing.GetDimensionOrDie("Distance").SetGlobalSpanCostCoefficient(100)
+    if k > 1 and balance:
+        # balance: weight on the longest route (equal ride times) vs total km.
+        routing.GetDimensionOrDie("Distance").SetGlobalSpanCostCoefficient(int(balance))
 
     if capacity:
         dem = list(demands) + [0, 0]
@@ -553,16 +636,27 @@ def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limi
     return routes
 
 
-def get_road_geometry(coords_list, gmaps_key=""):
+def _stop_wp(c, heading):
+    # Google rejects heading + sideOfRoad together; a heading already fixes the side.
+    w = _wp(*c)["waypoint"]
+    if heading is None:
+        return {**w, "sideOfRoad": True}
+    w["location"]["heading"] = int(round(heading)) % 360
+    return w
+
+
+def get_road_geometry(coords_list, gmaps_key="", headings=None):
     if len(coords_list) < 2:
         return list(coords_list)
+    hs = list(headings) if headings is not None else [None] * len(coords_list)
     if gmaps_key and len(coords_list) <= 27:  # Routes API: ≤25 intermediates
         try:
             r = requests.post(
                 "https://routes.googleapis.com/directions/v2:computeRoutes",
                 headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
-                json={"origin": _wp(*coords_list[0])["waypoint"], "destination": _wp(*coords_list[-1])["waypoint"],
-                      "intermediates": [{**_wp(*c)["waypoint"], "sideOfRoad": True} for c in coords_list[1:-1]],
+                json={"origin": _stop_wp(coords_list[0], hs[0]) if hs[0] is not None else _wp(*coords_list[0])["waypoint"],
+                      "destination": _wp(*coords_list[-1])["waypoint"],
+                      "intermediates": [_stop_wp(c, h) for c, h in zip(coords_list[1:-1], hs[1:-1])],
                       "travelMode": "DRIVE"},
                 timeout=15,
             )
@@ -619,3 +713,124 @@ def google_tile_session(gmaps_key, lang="he", referer=None):
     except (requests.RequestException, ValueError):
         pass
     return None
+
+
+def improve_stops_for_route(routes, walk, M, dest_idx, max_walk_m, start_idx=None, max_iter=100):
+    """Local search after routing: swap a stop for an unused one when every kid it
+    serves can still walk (within max_walk, or no farther than now) and the bus
+    path gets shorter. Stop selection alone only minimises walking/stop count, so
+    it happily picks stops on side streets; this pulls them onto the bus's path.
+
+    routes: lists of stop indices (columns of walk / rows of M).
+    M: driving matrix over the candidate pool, with dest_idx (and start_idx) in it.
+    """
+    routes = [list(r) for r in routes]
+    n_cand = walk.shape[1]
+    changed = False
+    for _ in range(max_iter):
+        selected = [s for r in routes for s in r]
+        sub = walk[:, selected]
+        nearest = np.array(selected)[np.argmin(sub, axis=1)]
+        best = (-1.0, None)
+        for ri, r in enumerate(routes):
+            for pos, s in enumerate(r):
+                kids = np.where(nearest == s)[0]
+                others = [x for x in selected if x != s]
+                prev = r[pos - 1] if pos else start_idx
+                nxt = r[pos + 1] if pos + 1 < len(r) else dest_idx
+                old = (M[prev, s] if prev is not None else 0) + M[s, nxt]
+                for c in range(n_cand):
+                    if c in selected:
+                        continue
+                    alt = walk[np.ix_(kids, [c] + others)].min(axis=1) if len(kids) else np.array([])
+                    if not np.all(alt <= np.maximum(max_walk_m, walk[kids, s])):
+                        continue
+                    delta = (M[prev, c] if prev is not None else 0) + M[c, nxt] - old
+                    if delta < best[0]:
+                        best = (delta, (ri, pos, c))
+        if best[1] is None:
+            break
+        ri, pos, c = best[1]
+        routes[ri][pos] = c
+        changed = True
+    return routes, changed
+
+
+def stop_heading(stop, gmaps_key, approach_from=None):
+    """Direction (deg) a bus faces when it pulls into this stop on the stop's side
+    of the road (sideOfRoad), taken from the last leg of a Google route to it."""
+    if not gmaps_key:
+        return None
+    origin = approach_from or (stop[0] + 0.01, stop[1] + 0.01)
+    try:
+        r = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
+            json={"origin": _wp(*origin)["waypoint"],
+                  "destination": {**_wp(*stop)["waypoint"], "sideOfRoad": True},
+                  "travelMode": "DRIVE"},
+            timeout=15,
+        )
+        if not (r.ok and r.json().get("routes")):
+            return None
+        path = decode_polyline(r.json()["routes"][0]["polyline"]["encodedPolyline"])
+    except (requests.RequestException, ValueError, KeyError):
+        return None
+    # last segment of at least a few metres
+    for k in range(len(path) - 1, 0, -1):
+        if haversine_matrix([path[k - 1]], [path[k]])[0, 0] >= 3:
+            return bearing(path[k - 1], path[k])
+    return None
+
+
+def plan_routes(passengers, stops, walk, dest, origin, num_routes, max_walk_m,
+                gmaps_key="", capacity=None, heading_fn=None, swap_rounds=3):
+    """Full planning pipeline shared by the app and offline evaluation.
+
+    1. pool = stops some kid can reach within max_walk; greedy stop selection.
+    2. Route-aware swap on a free OSRM kerb-side matrix (cheap screening).
+    3. Final stops: arrival heading per stop (Google), heading-aware Google
+       driving matrix, final VRP — buses leave stops facing forward, so turning
+       back costs real distance and U-turn routes lose.
+    Returns (selected_stops_df, passengers_df, routes, headings) where routes is a
+    list of lists of row indices into selected_stops_df, in visiting order.
+    """
+    heading_fn = heading_fn or (lambda xy: stop_heading(xy, gmaps_key))
+    passengers = passengers.reset_index(drop=True)
+    if stops is None or stops.empty or walk is None:
+        sel, p = select_optimal_stops(passengers, stops, walk, max_walk_m)
+        pool_df, Wp = sel, None
+    else:
+        reach = (walk <= max_walk_m).any(axis=0)
+        reach[np.argmin(walk, axis=1)] = True  # keep everyone's nearest, even if too far
+        pool = np.where(reach)[0]
+        pool_df = stops.iloc[pool].reset_index(drop=True)
+        Wp = np.asarray(walk)[:, pool]
+        sel, p = select_optimal_stops(passengers, pool_df, Wp, max_walk_m)
+
+    if Wp is not None and swap_rounds and len(sel) > 1:
+        pxy = list(zip(pool_df.lat, pool_df.lon))
+        extra = [dest] + ([origin] if origin else [])
+        M = driving_matrix(pxy + extra, gmaps_key, free_only=True)
+        di, oi = len(pxy), (len(pxy) + 1 if origin else None)
+        key = {xy: i for i, xy in enumerate(pxy)}
+        cur = [key[xy] for xy in zip(sel.lat, sel.lon)]
+        for _ in range(swap_rounds):
+            ids = cur + [di, oi if origin else di]
+            sub = M[np.ix_(ids, ids)]
+            dem = np.bincount(np.argmin(Wp[:, cur], axis=1), minlength=len(cur))
+            r = solve_vrp([pxy[i] for i in cur], dest, origin, num_routes, dem.tolist(), capacity, dist_matrix=sub)
+            if r is None:
+                break
+            r, changed = improve_stops_for_route([[cur[i] for i in x] for x in r], Wp, M, di, max_walk_m, start_idx=oi)
+            cur = [s for x in r for s in x]
+            if not changed:
+                break
+        sel, p = select_optimal_stops(passengers, pool_df.iloc[cur].reset_index(drop=True), Wp[:, cur], max_walk_m)
+
+    sxy = list(zip(sel.lat, sel.lon))
+    headings = [heading_fn(xy) for xy in sxy] if gmaps_key else [None] * len(sxy)
+    pts = sxy + [dest, origin or dest]
+    D = driving_matrix(pts, gmaps_key, headings=headings + [None, None])
+    routes = solve_vrp(sxy, dest, origin, num_routes, sel["passengers_count"].tolist(), capacity, dist_matrix=D)
+    return sel, p, routes, headings

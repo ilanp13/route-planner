@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pandas as pd
 import pytest
@@ -184,7 +185,7 @@ def test_solve_vrp_uses_given_distance_matrix():
 
 
 def test_driving_matrix_falls_back_to_scaled_air(monkeypatch):
-    monkeypatch.setattr(rc, "_osrm_table", lambda pts: None)
+    monkeypatch.setattr(rc, "_osrm_table", lambda pts, curb=False: None)
     pts = [(0.0, 0.0), (0.0, 0.01)]
     m = rc.driving_matrix(pts, gmaps_key="")
     assert m.shape == (2, 2) and m[0, 1] > rc.haversine_matrix(pts, pts)[0, 1]
@@ -229,3 +230,87 @@ def test_google_tile_session_sends_referer(monkeypatch):
     monkeypatch.setattr(rc.requests, "post", fake)
     rc.google_tile_session("k", "he", referer="https://app.example/")
     assert seen.get("Referer") == "https://app.example/"
+
+
+def test_route_aware_swap_replaces_off_route_stop():
+    # Route: S0 -> S1 -> dest. Kid k1 uses S1, which sits on a 1km side street;
+    # candidate C (index 2) covers k1 equally well and lies on the main road.
+    walk = np.array([[50, 900, 900],     # k0 -> S0
+                     [900, 200, 250]],   # k1 -> S1 or C
+                    float)
+    # pool order: [S0, S1, C, dest]
+    M = np.array([[0, 1000, 100, 1100],
+                  [1000, 0, 1000, 1000],
+                  [100, 1000, 0, 1000],
+                  [0, 0, 0, 0]], float)
+    routes = [[0, 1]]
+    new_routes, changed = rc.improve_stops_for_route(routes, walk, M, dest_idx=3, max_walk_m=350)
+    assert changed and new_routes == [[0, 2]]
+
+
+def test_route_aware_swap_keeps_walk_limit():
+    walk = np.array([[50, 900, 900], [900, 200, 600]], float)  # C would exceed 350m for k1
+    M = np.array([[0, 1000, 100, 1100], [1000, 0, 1000, 1000], [100, 1000, 0, 1000], [0, 0, 0, 0]], float)
+    new_routes, changed = rc.improve_stops_for_route([[0, 1]], walk, M, dest_idx=3, max_walk_m=350)
+    assert not changed and new_routes == [[0, 1]]
+
+
+# ---------- v4: headings / u-turns ----------
+
+def test_bearing_cardinal():
+    assert rc.bearing((0, 0), (0.01, 0)) == pytest.approx(0, abs=1)      # north
+    assert rc.bearing((0, 0), (0, 0.01)) == pytest.approx(90, abs=1)     # east
+    assert rc.bearing((0, 0), (-0.01, 0)) == pytest.approx(180, abs=1)
+
+
+def test_count_uturns_detects_reversal_not_corners():
+    straight = [(0, 0), (0.001, 0), (0.002, 0), (0.003, 0)]
+    corner = [(0, 0), (0.001, 0), (0.001, 0.001), (0.001, 0.002)]          # 90° turn
+    uturn = [(0, 0), (0.001, 0), (0.002, 0), (0.0021, 0.00003), (0.001, 0.00003), (0, 0.00003)]
+    assert rc.count_uturns(straight) == 0
+    assert rc.count_uturns(corner) == 0
+    assert rc.count_uturns(uturn) == 1
+
+
+def test_stop_heading_from_arrival_polyline(monkeypatch):
+    # arrival path going east → heading ≈ 90
+    poly = rc.encode_polyline([(0, 0), (0, 0.001), (0, 0.002)])
+    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp(
+        {"routes": [{"polyline": {"encodedPolyline": poly}}]}))
+    assert rc.stop_heading((0, 0.002), "k") == pytest.approx(90, abs=2)
+
+
+def test_drive_block_sends_origin_heading(monkeypatch):
+    sent = {}
+
+    class R(_Resp):
+        pass
+
+    def fake(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+        return R([])
+    monkeypatch.setattr(rc.requests, "post", fake)
+    rc._google_drive_block([(0, 0)], [(0, 1)], "k", origin_headings=[45])
+    assert sent["origins"][0]["waypoint"]["location"]["heading"] == 45
+
+
+def _circle(center, r_deg, start_deg, end_deg, step=15):
+    out = []
+    a = start_deg
+    while (end_deg - a) * (1 if end_deg > start_deg else -1) >= 0:
+        out.append((center[0] + r_deg * math.cos(math.radians(a)), center[1] + r_deg * math.sin(math.radians(a))))
+        a += abs(step) if end_deg > start_deg else -abs(step)
+    return out
+
+
+def test_roundabout_left_turn_is_not_a_uturn():
+    # approach northbound, go 3/4 around a 20m roundabout (counter-clockwise), exit westbound
+    r = 0.00018
+    path = [(-0.0015, 0), (-0.0008, 0), (-r, 0)] + _circle((0, 0), r, 180, -90, step=-15)[1:] + [(0, -0.0008), (0, -0.0015)]
+    assert rc.count_uturns(path) == 0
+
+
+def test_roundabout_full_circle_back_is_a_uturn():
+    r = 0.00018
+    path = [(-0.0015, 0), (-0.0008, 0), (-r, 0)] + _circle((0, 0), r, 180, -180, step=-15)[1:] + [(-0.0008, 0.00002), (-0.0015, 0.00002)]
+    assert rc.count_uturns(path) == 1

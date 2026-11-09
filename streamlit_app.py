@@ -122,8 +122,8 @@ def app_base_url():
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
-def cached_drive(pts, key):
-    return rc.driving_matrix(pts, key)
+def cached_heading(xy, key):
+    return rc.stop_heading(xy, key)
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
@@ -184,15 +184,12 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
         walk = cached_walk(p_xy, stops[["lat", "lon"]].to_numpy(), max_walk, GMAPS_KEY) if not stops.empty else None
 
         status.update(label=T["status_clustering"])
-        sel, passengers = rc.select_optimal_stops(passengers, stops, walk, max_walk)
-
-        status.update(label=T["status_routing"])
-        stop_xy = list(zip(sel.lat, sel.lon))
         dest_xy = (dest["lat"], dest["lon"])
         origin_xy = (origin["lat"], origin["lon"]) if origin else None
-        drive = cached_drive(tuple(stop_xy) + (dest_xy, origin_xy or dest_xy), GMAPS_KEY)
-        routes_idx = rc.solve_vrp(stop_xy, dest_xy, origin_xy, num_routes,
-                                  sel["passengers_count"].tolist(), capacity or None, dist_matrix=drive)
+        status.update(label=T["status_routing"])
+        sel, passengers, routes_idx, headings = rc.plan_routes(
+            passengers, stops, walk, dest_xy, origin_xy, num_routes, max_walk,
+            GMAPS_KEY, capacity or None, heading_fn=lambda xy: cached_heading(xy, GMAPS_KEY))
         if routes_idx is None:
             st.error(T["err_capacity"])
             return None
@@ -208,7 +205,8 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
                        "passengers": int(sel.at[i, "passengers_count"])} for i in idxs]
             nodes.append({"kind": "dest", "name": dest_address, "lat": dest_xy[0], "lon": dest_xy[1], "passengers": 0})
             routes[r_id] = nodes
-            geometry[r_id] = rc.get_road_geometry([(n["lat"], n["lon"]) for n in nodes], GMAPS_KEY)
+            hs = ([None] if origin_xy else []) + [headings[i] for i in idxs] + [None]
+            geometry[r_id] = rc.get_road_geometry([(n["lat"], n["lon"]) for n in nodes], GMAPS_KEY, hs)
         passengers["route_id"] = sel["route_id"].values[passengers["assigned_stop_idx"]]
         walk_paths = [cached_walk_path((p.lat, p.lon), (sel.at[p.assigned_stop_idx, "lat"], sel.at[p.assigned_stop_idx, "lon"]),
                                        GMAPS_KEY) for p in passengers.itertuples()]
