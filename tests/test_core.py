@@ -321,6 +321,7 @@ def test_no_google_left():
     for f in ("route_core.py", "streamlit_app.py"):
         src = pathlib.Path(f).read_text()
         assert "googleapis.com" not in src, f
+        assert "CartoDB" not in src, f  # Carto tiles need a key now (watermark)
 
 
 def test_osm_stops_disk_cache_survives_outage(monkeypatch, tmp_path):

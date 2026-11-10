@@ -252,9 +252,8 @@ def render_results(res):
 
     st.subheader(T["map_title"])
     pts = p_df[["lat", "lon"]].values.tolist() + [list(res["dest_coords"])]
-    m = folium.Map(control_scale=True, tiles=None)
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB Voyager", name="Carto Voyager").add_to(m)
+    # OpenStreetMap tiles only: free, no key (Carto now watermarks keyless requests).
+    m = folium.Map(control_scale=True, tiles="OpenStreetMap")
     m.fit_bounds([[min(p[0] for p in pts), min(p[1] for p in pts)], [max(p[0] for p in pts), max(p[1] for p in pts)]])
 
     for r_num, geom in r_geom.items():
@@ -282,7 +281,6 @@ def render_results(res):
     folium.Marker(res["dest_coords"], tooltip=T["dest_label"], icon=folium.Icon(color="black", icon="flag")).add_to(m)
     if res["origin_coords"]:
         folium.Marker(res["origin_coords"], tooltip=T["origin_label"], icon=folium.Icon(color="green", icon="play")).add_to(m)
-    folium.LayerControl(position="topleft").add_to(m)
     st_folium(m, width=None, height=540, returned_objects=[])
 
     tab1, tab2, tab3 = st.tabs([T["tab_outbound"], T["tab_inbound"], T["tab_passengers"]])
