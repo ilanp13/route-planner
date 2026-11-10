@@ -36,13 +36,10 @@ def auth_configured():
         return False
 
 
-GMAPS_KEY = str(get_setting("GOOGLE_MAPS_API_KEY")).strip()
-# The tiles key is sent to every viewer's browser, so it must be a separate key
-# restricted to the Map Tiles API + this app's URL. Never fall back to GMAPS_KEY.
-TILES_KEY = str(get_setting("GOOGLE_MAPS_TILES_KEY") or "").strip()
 EDITORS = [e for e in ms.parse_emails(get_setting("EDITOR_EMAILS")) if e != ms.PUBLIC]
 DEV_MODE = os.environ.get("ROUTE_PLANNER_DEV") == "1"
 store = ms.MapStore(get_setting("MAPS_DIR", "data/maps"))
+STOPS_CACHE_DIR = get_setting("STOPS_CACHE_DIR", "data/stops_cache")
 
 lang_choice = st.sidebar.radio("Language / שפה", ["עברית", "English"], horizontal=True)
 lang_code = "he" if lang_choice == "עברית" else "en"
@@ -77,58 +74,47 @@ with st.sidebar:
 
 # ------------------------------------------------------------------ cached network calls
 
+# All services below are free (OpenStreetMap / Nominatim / Overpass / OSRM) — no
+# API keys and no billing. Caching keeps load on these community servers low.
+
 @st.cache_data(show_spinner=False, ttl=7 * 24 * 3600)
-def cached_city(city, key, lang):
-    return rc.geocode_city(city, key, lang)
+def cached_city(city):
+    return rc.geocode_city(city)
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
-def cached_geocode(address, city, key, lang, city_info):
-    return rc.geocode_address(address, city, key, lang, city_info)
+def cached_geocode(address, city, city_info):
+    return rc.geocode_address(address, city, city_info)
 
 
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
-def cached_stops(bbox, key, lang):
-    frames = []
-    if key:
-        frames.append(rc.fetch_bus_stops_google(bbox, key, lang))
-    frames.append(rc.fetch_bus_stops_osm(bbox, lang))
-    sources = [n for n, f in zip(["Google", "OSM"] if key else ["OSM"], frames) if not f.empty]
-    if not sources:
+def cached_stops(bbox, lang):
+    stops = rc.fetch_bus_stops_osm(bbox, lang, cache_dir=STOPS_CACHE_DIR)
+    if stops.empty:
         raise LookupError("no stops")  # exceptions aren't cached, so the next run retries
-    return rc.merge_stops(frames), sources
+    return rc.merge_stops([stops]), ["OSM"]
 
 
-def get_stops(bbox, key, lang):
+def get_stops(bbox, lang):
     try:
-        return cached_stops(bbox, key, lang)
+        return cached_stops(bbox, lang)
     except LookupError:
         return pd.DataFrame(columns=rc.STOP_COLS), []
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
-def cached_walk_path(home, stop, key):
-    return rc.walking_path(home, stop, key)
-
-
-@st.cache_data(show_spinner=False, ttl=24 * 3600)  # sessions last ~2 weeks
-def cached_tile_session(key, lang, referer):
-    return rc.google_tile_session(key, lang, referer)
-
-
-def app_base_url():
-    base = get_setting("APP_URL") or getattr(st.context, "url", "") or ""
-    return base.split("?")[0].rstrip("/") + "/" if base else ""
+def cached_walk_path(home, stop):
+    return rc.walking_path(home, stop)
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
-def cached_heading(xy, key):
-    return rc.stop_heading(xy, key)
+def cached_heading(xy):
+    return rc.stop_heading(xy)
 
 
 @st.cache_data(show_spinner=False, ttl=30 * 24 * 3600)
-def cached_walk(p_coords, s_coords, max_walk, key):
-    return rc.walking_matrix(p_coords, s_coords, max_walk, key)
+def cached_walk(p_coords, s_coords, max_walk):
+    return rc.walking_matrix(p_coords, s_coords, max_walk)
 
 
 # ------------------------------------------------------------------ computation
@@ -136,15 +122,15 @@ def cached_walk(p_coords, s_coords, max_walk, key):
 def compute(df_input, address_col, name_col, city, dest_address, origin_address,
             num_routes, capacity, max_walk):
     with st.status(T["status_city"], expanded=True) as status:
-        city_info = cached_city(city.strip(), GMAPS_KEY, lang_code)
+        city_info = cached_city(city.strip())
         if not city_info:
             st.error(f"{T['err_city']} {city}")
             return None
 
         def locate(addr):
             # Destination/origin may lie just outside the city (e.g. a regional school).
-            return (cached_geocode(addr, city, GMAPS_KEY, lang_code, city_info)
-                    or cached_geocode(f"{addr}, {city}" if "," not in addr else addr, "", GMAPS_KEY, lang_code, None))
+            return (cached_geocode(addr, city, city_info)
+                    or cached_geocode(f"{addr}, {city}" if "," not in addr else addr, "", None))
 
         dest = locate(dest_address)
         if not dest:
@@ -159,14 +145,14 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
         prog = st.progress(0.0)
         for i, addr in enumerate(unique):
             started = time.time()
-            hit = cached_geocode(addr, city, GMAPS_KEY, lang_code, city_info)
+            hit = cached_geocode(addr, city, city_info)
             if hit:
                 coords[addr] = (hit["lat"], hit["lon"])
             else:
                 failed.append(addr)
             prog.progress((i + 1) / len(unique))
             # Nominatim policy: max 1 request/second. Cached hits return instantly.
-            if not GMAPS_KEY and time.time() - started > 0.05:
+            if time.time() - started > 0.05:
                 time.sleep(1.0)
         passengers = pd.DataFrame([{**r, "lat": coords[r["address"]][0], "lon": coords[r["address"]][1]}
                                    for r in rows if r["address"] in coords])
@@ -177,11 +163,11 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
         status.update(label=T["status_stops"])
         bbox = rc.pad_bbox((passengers.lat.min(), passengers.lon.min(),
                             passengers.lat.max(), passengers.lon.max()), max_walk + 300)
-        stops, stop_sources = get_stops(tuple(round(x, 5) for x in bbox), GMAPS_KEY, lang_code)
+        stops, stop_sources = get_stops(tuple(round(x, 5) for x in bbox), lang_code)
 
         status.update(label=T["status_walk"])
         p_xy = passengers[["lat", "lon"]].to_numpy()
-        walk = cached_walk(p_xy, stops[["lat", "lon"]].to_numpy(), max_walk, GMAPS_KEY) if not stops.empty else None
+        walk = cached_walk(p_xy, stops[["lat", "lon"]].to_numpy(), max_walk) if not stops.empty else None
 
         status.update(label=T["status_clustering"])
         dest_xy = (dest["lat"], dest["lon"])
@@ -189,7 +175,7 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
         status.update(label=T["status_routing"])
         sel, passengers, routes_idx, headings = rc.plan_routes(
             passengers, stops, walk, dest_xy, origin_xy, num_routes, max_walk,
-            GMAPS_KEY, capacity or None, heading_fn=lambda xy: cached_heading(xy, GMAPS_KEY))
+            capacity or None, heading_fn=cached_heading)
         if routes_idx is None:
             st.error(T["err_capacity"])
             return None
@@ -206,15 +192,15 @@ def compute(df_input, address_col, name_col, city, dest_address, origin_address,
             nodes.append({"kind": "dest", "name": dest_address, "lat": dest_xy[0], "lon": dest_xy[1], "passengers": 0})
             routes[r_id] = nodes
             hs = ([None] if origin_xy else []) + [headings[i] for i in idxs] + [None]
-            geometry[r_id] = rc.get_road_geometry([(n["lat"], n["lon"]) for n in nodes], GMAPS_KEY, hs)
+            geometry[r_id] = rc.get_road_geometry([(n["lat"], n["lon"]) for n in nodes], hs)
         passengers["route_id"] = sel["route_id"].values[passengers["assigned_stop_idx"]]
-        walk_paths = [cached_walk_path((p.lat, p.lon), (sel.at[p.assigned_stop_idx, "lat"], sel.at[p.assigned_stop_idx, "lon"]),
-                                       GMAPS_KEY) for p in passengers.itertuples()]
+        walk_paths = [cached_walk_path((p.lat, p.lon), (sel.at[p.assigned_stop_idx, "lat"], sel.at[p.assigned_stop_idx, "lon"]))
+                      for p in passengers.itertuples()]
 
         status.update(label=T["done"], state="complete", expanded=False)
     return {"passengers_df": passengers, "selected_stops": sel, "routes": routes, "routes_geometry": geometry,
             "dest_coords": dest_xy, "origin_coords": origin_xy, "failed_addrs": failed,
-            "stop_sources": stop_sources, "city": city, "used_google": bool(GMAPS_KEY),
+            "stop_sources": stop_sources, "city": city,
             "walk_paths": walk_paths}
 
 
@@ -266,13 +252,9 @@ def render_results(res):
 
     st.subheader(T["map_title"])
     pts = p_df[["lat", "lon"]].values.tolist() + [list(res["dest_coords"])]
-    session = cached_tile_session(TILES_KEY, lang_code, app_base_url()) if TILES_KEY else None
     m = folium.Map(control_scale=True, tiles=None)
-    if session:
-        folium.TileLayer(
-            tiles=f"https://tile.googleapis.com/v1/2dtiles/{{z}}/{{x}}/{{y}}?session={session}&key={TILES_KEY}",
-            attr="Map data ©Google", name="Google", max_zoom=22).add_to(m)
     folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer("CartoDB Voyager", name="Carto Voyager").add_to(m)
     m.fit_bounds([[min(p[0] for p in pts), min(p[1] for p in pts)], [max(p[0] for p in pts), max(p[1] for p in pts)]])
 
     for r_num, geom in r_geom.items():
@@ -377,10 +359,6 @@ with st.sidebar:
 
     if app_mode == T["mode_admin"]:
         st.divider()
-        if GMAPS_KEY:
-            st.success(T["api_active"])
-        else:
-            st.info(T["api_fallback"])
         uploaded = st.file_uploader(T["upload"], type=["xlsx", "xls", "csv"])
         df_input = address_col = name_col = None
         if uploaded is not None:

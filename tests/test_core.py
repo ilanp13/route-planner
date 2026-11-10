@@ -45,11 +45,6 @@ def test_clean_street_drops_apartment_part():
     assert rc.clean_street("הצדף 18/4", "") == "הצדף 18"
 
 
-def test_city_matches_google_result_by_locality():
-    result = {"address_components": [
-        {"long_name": "Yavne", "short_name": "Yavne", "types": ["locality", "political"]}]}
-    assert rc.google_result_in_city(result, ["יבנה", "Yavne"])
-    assert not rc.google_result_in_city(result, ["אשדוד", "Ashdod"])
 
 
 def test_point_in_bbox():
@@ -119,28 +114,8 @@ def test_solve_vrp_single_stop():
 
 # ---------- google walking matrix ----------
 
-def test_walking_matrix_only_queries_candidates_within_air_radius(monkeypatch):
-    calls = []
-
-    def fake(origins, dests, key):
-        calls.append((len(origins), len(dests)))
-        return np.full((len(origins), len(dests)), 123.0)
-
-    monkeypatch.setattr(rc, "_google_walk_block", fake)
-    p = np.array([[0.0, 0.0]])
-    s = np.array([[0.0, 0.001], [0.0, 0.5]])  # second stop ~55km away
-    m = rc.walking_matrix(p, s, max_walk_m=400, gmaps_key="k")
-    assert m[0, 0] == 123.0
-    assert m[0, 1] > 400  # never queried, stays as inflated air distance
-    assert calls == [(1, 1)]
 
 
-def test_walking_matrix_without_key_uses_detour_factor():
-    p = np.array([[0.0, 0.0]])
-    s = np.array([[0.0, 0.001]])
-    air = rc.haversine_matrix(p, s)[0, 0]
-    m = rc.walking_matrix(p, s, 400, gmaps_key="")
-    assert m[0, 0] == pytest.approx(air * rc.WALK_DETOUR_FACTOR)
 
 
 def test_search_is_literal_not_regex():
@@ -184,11 +159,6 @@ def test_solve_vrp_uses_given_distance_matrix():
     assert routes == [[0, 2, 1]]
 
 
-def test_driving_matrix_falls_back_to_scaled_air(monkeypatch):
-    monkeypatch.setattr(rc, "_osrm_table", lambda pts, curb=False: None)
-    pts = [(0.0, 0.0), (0.0, 0.01)]
-    m = rc.driving_matrix(pts, gmaps_key="")
-    assert m.shape == (2, 2) and m[0, 1] > rc.haversine_matrix(pts, pts)[0, 1]
 
 
 # ---------- v3: walking paths + google tiles ----------
@@ -201,35 +171,12 @@ class _Resp:
         return self._p
 
 
-def test_walking_path_decodes_google_polyline(monkeypatch):
-    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp(
-        {"routes": [{"polyline": {"encodedPolyline": "_p~iF~ps|U_ulLnnqC"}}]}))
-    path = rc.walking_path((38.5, -120.2), (40.7, -120.95), "k")
-    assert path[0] == (38.5, -120.2) and path[-1] == (40.7, -120.95)
 
 
-def test_walking_path_without_key_or_on_error_is_none(monkeypatch):
-    assert rc.walking_path((0, 0), (0, 1), "") is None
-    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp({}, ok=False))
-    assert rc.walking_path((0, 0), (0, 1), "k") is None
 
 
-def test_google_tile_session(monkeypatch):
-    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp({"session": "S1"}))
-    assert rc.google_tile_session("k", "he") == "S1"
-    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp({}, ok=False))
-    assert rc.google_tile_session("k", "he") is None
 
 
-def test_google_tile_session_sends_referer(monkeypatch):
-    seen = {}
-
-    def fake(*a, **k):
-        seen.update(k.get("headers") or {})
-        return _Resp({"session": "S"})
-    monkeypatch.setattr(rc.requests, "post", fake)
-    rc.google_tile_session("k", "he", referer="https://app.example/")
-    assert seen.get("Referer") == "https://app.example/"
 
 
 def test_route_aware_swap_replaces_off_route_stop():
@@ -272,26 +219,8 @@ def test_count_uturns_detects_reversal_not_corners():
     assert rc.count_uturns(uturn) == 1
 
 
-def test_stop_heading_from_arrival_polyline(monkeypatch):
-    # arrival path going east → heading ≈ 90
-    poly = rc.encode_polyline([(0, 0), (0, 0.001), (0, 0.002)])
-    monkeypatch.setattr(rc.requests, "post", lambda *a, **k: _Resp(
-        {"routes": [{"polyline": {"encodedPolyline": poly}}]}))
-    assert rc.stop_heading((0, 0.002), "k") == pytest.approx(90, abs=2)
 
 
-def test_drive_block_sends_origin_heading(monkeypatch):
-    sent = {}
-
-    class R(_Resp):
-        pass
-
-    def fake(url, headers=None, json=None, timeout=None):
-        sent.update(json)
-        return R([])
-    monkeypatch.setattr(rc.requests, "post", fake)
-    rc._google_drive_block([(0, 0)], [(0, 1)], "k", origin_headings=[45])
-    assert sent["origins"][0]["waypoint"]["location"]["heading"] == 45
 
 
 def _circle(center, r_deg, start_deg, end_deg, step=15):
@@ -314,3 +243,94 @@ def test_roundabout_full_circle_back_is_a_uturn():
     r = 0.00018
     path = [(-0.0015, 0), (-0.0008, 0), (-r, 0)] + _circle((0, 0), r, 180, -180, step=-15)[1:] + [(-0.0008, 0.00002), (-0.0015, 0.00002)]
     assert rc.count_uturns(path) == 1
+
+
+
+# ---------- free routing (OSRM / FOSSGIS) ----------
+
+def test_walking_matrix_only_queries_candidates_within_air_radius(monkeypatch):
+    calls = []
+
+    def fake(src, dst):
+        calls.append((len(src), len(dst)))
+        return np.full((len(src), len(dst)), 123.0)
+
+    monkeypatch.setattr(rc, "_foot_table", fake)
+    p = np.array([[0.0, 0.0]])
+    s = np.array([[0.0, 0.001], [0.0, 0.5], [0.0, 0.6], [0.0, 0.7], [0.0, 0.8]])
+    m = rc.walking_matrix(p, s, max_walk_m=400, min_candidates=1)
+    assert m[0, 0] == 123.0
+    assert m[0, 1] > 400  # never queried, stays as inflated air distance
+    assert calls == [(1, 1)]
+
+
+def test_walking_matrix_falls_back_when_router_down(monkeypatch):
+    monkeypatch.setattr(rc, "_foot_table", lambda src, dst: None)
+    p = np.array([[0.0, 0.0]])
+    s = np.array([[0.0, 0.001]])
+    air = rc.haversine_matrix(p, s)[0, 0]
+    assert rc.walking_matrix(p, s, 400)[0, 0] == pytest.approx(air * rc.WALK_DETOUR_FACTOR)
+
+
+def test_driving_matrix_sends_curb_and_bearings(monkeypatch):
+    seen = {}
+
+    def fake(bases, src, dst, extra=None):
+        seen.update(extra)
+        return np.ones((len(src), len(dst)))
+    monkeypatch.setattr(rc, "_osrm_table", fake)
+    m = rc.driving_matrix([(0, 0), (0, 0.01)], headings=[90, None])
+    assert seen["approaches"] == ["curb"] * 4
+    assert seen["bearings"] == ["90,45", "", "90,45", ""]
+    assert m[0, 0] == 0 and m[0, 1] == 1
+
+
+def test_driving_matrix_falls_back_to_scaled_air(monkeypatch):
+    monkeypatch.setattr(rc, "_osrm_table", lambda *a, **k: None)
+    pts = [(0.0, 0.0), (0.0, 0.01)]
+    m = rc.driving_matrix(pts)
+    assert m[0, 1] == pytest.approx(rc.haversine_matrix(pts, pts)[0, 1] * 1.4)
+
+
+def test_osrm_table_parses_null_as_nan(monkeypatch):
+    monkeypatch.setattr(rc, "_osrm_get", lambda *a, **k: {"code": "Ok", "distances": [[0, None]]})
+    m = rc._osrm_table(["x"], [(0, 0)], [(0, 1), (0, 2)])
+    assert m[0, 0] == 0 and np.isnan(m[0, 1])
+
+
+def test_walking_path_reads_geojson(monkeypatch):
+    monkeypatch.setattr(rc, "_osrm_get", lambda *a, **k: {"routes": [{"geometry": {"coordinates": [[34.7, 31.8], [34.71, 31.81]]}}]})
+    assert rc.walking_path((31.8, 34.7), (31.81, 34.71)) == [(31.8, 34.7), (31.81, 34.71)]
+    monkeypatch.setattr(rc, "_osrm_get", lambda *a, **k: None)
+    assert rc.walking_path((0, 0), (0, 1)) is None
+
+
+def test_stop_heading_from_last_leg(monkeypatch):
+    sent = {}
+
+    def fake(bases, service, coords, params, timeout=40):
+        sent.update(params)
+        return {"routes": [{"geometry": {"coordinates": [[0, 0], [0.001, 0], [0.002, 0]]}}]}  # eastbound
+    monkeypatch.setattr(rc, "_osrm_get", fake)
+    assert rc.stop_heading((0, 0.002)) == pytest.approx(90, abs=2)
+    assert sent["approaches"] == "unrestricted;curb"
+
+
+def test_no_google_left():
+    import pathlib
+    for f in ("route_core.py", "streamlit_app.py"):
+        src = pathlib.Path(f).read_text()
+        assert "googleapis.com" not in src, f
+
+
+def test_osm_stops_disk_cache_survives_outage(monkeypatch, tmp_path):
+    good = pd.DataFrame([{"stop_id": "osm:1", "name": "A (123)", "lat": 31.05, "lon": 34.05}])
+    monkeypatch.setattr(rc, "_overpass_stops", lambda bbox, lang: good)
+    bbox = (31.0, 34.0, 31.1, 34.1)
+    assert len(rc.fetch_bus_stops_osm(bbox, cache_dir=tmp_path)) == 1
+    monkeypatch.setattr(rc, "_overpass_stops", lambda bbox, lang: None)  # server down
+    again = rc.fetch_bus_stops_osm(bbox, cache_dir=tmp_path)
+    assert list(again["stop_id"]) == ["osm:1"]
+    # a bbox inside a cached one is served from it too
+    inner = rc.fetch_bus_stops_osm((31.01, 34.01, 31.09, 34.09), cache_dir=tmp_path)
+    assert len(inner) == 1

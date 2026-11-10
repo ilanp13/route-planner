@@ -2,8 +2,13 @@
 
 Streamlit app that picks bus stops for a list of home addresses and plans pickup routes.
 
+## Free by design
+No paid APIs and no keys: addresses via Nominatim, bus stops via OpenStreetMap
+(Overpass), walking distances/paths via the FOSSGIS OSRM foot router, driving via
+OSRM car routing (kerb-side approach, stop headings), base map via OSM/Carto tiles.
+All are community servers — results are cached to keep load low.
+
 ## Settings (env vars or Streamlit secrets)
-- `GOOGLE_MAPS_API_KEY` — enables Google geocoding, Places (New) bus stops and Routes API walking distances. Without it: OSM/Nominatim/Overpass with estimated walking.
 - `EDITOR_EMAILS` — comma-separated emails allowed to compute/edit maps.
 - `[auth]` section in secrets — Google OIDC for `st.login` (required for editing when deployed).
 - `MAPS_DIR` (default `data/maps`), `APP_URL` (base for share links). Local dev without auth: `ROUTE_PLANNER_DEV=1`.

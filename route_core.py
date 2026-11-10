@@ -14,13 +14,17 @@ import requests
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 EARTH_R = 6371000.0
-# Without Google, a straight line under-estimates walking. Typical urban grid detour ≈ 1.3.
+# Fallback only, when the walking router is unreachable: urban grid detour ≈ 1.3.
 WALK_DETOUR_FACTOR = 1.3
 NOMINATIM_HEADERS = {"User-Agent": "BusRouteOptimizerApp/2.0 (school route planner)"}
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",
                  "https://overpass.kumi.systems/api/interpreter",
                  "https://overpass.private.coffee/api/interpreter"]
-GOOGLE_DM_MAX_DESTS = 25  # Distance Matrix: ≤25 destinations, ≤100 elements per request
+# Free OSRM routers (no API key, no billing). FOSSGIS hosts car + real foot profiles;
+# the public OSRM demo is car-only (its "foot" URL silently routes as a car).
+CAR_ROUTERS = ["https://routing.openstreetmap.de/routed-car", "https://router.project-osrm.org"]
+FOOT_ROUTERS = ["https://routing.openstreetmap.de/routed-foot"]
+OSRM_MAX_COORDS = 100
 
 
 # ---------------------------------------------------------------- geometry
@@ -197,39 +201,13 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s\-'\"׳״]", "", str(s)).lower()
 
 
-def google_result_in_city(result: dict, city_names) -> bool:
-    wanted = {_norm(c) for c in city_names if c}
-    for comp in result.get("address_components", []):
-        if {"locality", "administrative_area_level_2", "postal_town"} & set(comp.get("types", [])):
-            if _norm(comp.get("long_name", "")) in wanted or _norm(comp.get("short_name", "")) in wanted:
-                return True
-    return False
-
-
 # ---------------------------------------------------------------- geocoding
 
-def geocode_city(city: str, gmaps_key: str = "", lang: str = "he"):
+def geocode_city(city: str, lang: str = "he"):
     """Returns {'bbox': (minlat,minlon,maxlat,maxlon), 'names': [...]} or None."""
     if not city.strip():
         return None
     names = [city.strip()]
-    if gmaps_key:
-        for lg in (lang, "en"):
-            try:
-                res = requests.get(
-                    "https://maps.googleapis.com/maps/api/geocode/json",
-                    params={"address": city, "components": "country:IL", "key": gmaps_key, "language": lg},
-                    timeout=10,
-                ).json()
-            except requests.RequestException:
-                break
-            if res.get("status") == "OK":
-                r = res["results"][0]
-                names.append(r["address_components"][0]["long_name"])
-                vp = r["geometry"].get("bounds") or r["geometry"]["viewport"]
-                bbox = (vp["southwest"]["lat"], vp["southwest"]["lng"], vp["northeast"]["lat"], vp["northeast"]["lng"])
-        if len(names) > 1:
-            return {"bbox": bbox, "names": list(dict.fromkeys(names))}
     try:
         data = requests.get(
             "https://nominatim.openstreetmap.org/search",
@@ -245,34 +223,14 @@ def geocode_city(city: str, gmaps_key: str = "", lang: str = "he"):
     return {"bbox": (bb[0], bb[2], bb[1], bb[3]), "names": names}
 
 
-def geocode_address(address: str, city: str = "", gmaps_key: str = "", lang: str = "he", city_info=None):
-    """Returns {'lat','lon','source'} or None. With a city, any result outside it
-    is rejected, and so are street-less results that only hit the city centre."""
+def geocode_address(address: str, city: str = "", city_info=None):
+    """Returns {'lat','lon','source'} or None via Nominatim. With a city, any
+    result outside its bounding box is rejected."""
     street = clean_street(address, city) if city else str(address).strip()
     bbox = pad_bbox(city_info["bbox"], 300) if city_info else None
-    names = city_info["names"] if city_info else [city]
 
     def ok(lat, lon):
         return bbox is None or in_bbox(lat, lon, bbox)
-
-    if gmaps_key:
-        params = {"address": f"{street}, {city}" if city else street, "key": gmaps_key,
-                  "language": lang, "region": "il"}
-        params["components"] = f"country:IL|locality:{city}" if city else "country:IL"
-        try:
-            res = requests.get("https://maps.googleapis.com/maps/api/geocode/json", params=params, timeout=10).json()
-        except (requests.RequestException, ValueError):
-            res = {}
-        for r in res.get("results", []):
-            types = set(r.get("types", []))
-            if types & {"locality", "political", "postal_code"} and not types & {"street_address", "premise", "route", "subpremise"}:
-                continue  # only matched the city/zip, not the street
-            loc = r["geometry"]["location"]
-            if city and not (google_result_in_city(r, names) or ok(loc["lat"], loc["lng"])):
-                continue
-            if not ok(loc["lat"], loc["lng"]):
-                continue
-            return {"lat": float(loc["lat"]), "lon": float(loc["lng"]), "source": "google"}
 
     for n, variant in enumerate(street_variants(street) if city else [street]):
         if n:
@@ -301,25 +259,31 @@ def geocode_address(address: str, city: str = "", gmaps_key: str = "", lang: str
 STOP_COLS = ["stop_id", "name", "lat", "lon"]
 
 
-def fetch_bus_stops_osm(bbox, lang="he") -> pd.DataFrame:
+def _overpass_stops(bbox, lang="he", attempts=2):
+    """Query Overpass mirrors (with retries). Returns a DataFrame, or None when every
+    server failed — distinct from an empty result for an area with no stops."""
     b = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
-    query = f"""[out:json][timeout:25];
+    query = f"""[out:json][timeout:60];
     ( node["highway"="bus_stop"]({b});
       node["public_transport"="platform"]["bus"="yes"]({b}); );
     out body;"""
     elements = None
-    # Overpass rejects requests without a meaningful User-Agent (406/429) — the
-    # old code sent none, so it always got zero stops. Try mirrors in turn.
-    for url in OVERPASS_URLS:
-        try:
-            r = requests.post(url, data={"data": query}, headers=NOMINATIM_HEADERS, timeout=60)
-            if r.ok:
-                elements = r.json().get("elements", [])
-                break
-        except (requests.RequestException, ValueError):
-            continue
+    # Overpass rejects requests without a meaningful User-Agent (406/429), and the
+    # public servers time out under load — try every mirror, twice, with backoff.
+    for attempt in range(attempts):
+        for url in OVERPASS_URLS:
+            try:
+                r = requests.post(url, data={"data": query}, headers=NOMINATIM_HEADERS, timeout=90)
+                if r.ok:
+                    elements = r.json().get("elements", [])
+                    break
+            except (requests.RequestException, ValueError):
+                continue
+        if elements is not None:
+            break
+        time.sleep(5 * (attempt + 1))
     if elements is None:
-        return pd.DataFrame(columns=STOP_COLS)
+        return None
     stops = []
     for el in elements:
         t = el.get("tags", {})
@@ -330,40 +294,29 @@ def fetch_bus_stops_osm(bbox, lang="he") -> pd.DataFrame:
     return pd.DataFrame(stops, columns=STOP_COLS)
 
 
-def _grid_centers(bbox, radius_m):
-    step = radius_m * 1.4  # circles of radius r on a 1.4r grid overlap fully
-    lat_steps = max(1, math.ceil((bbox[2] - bbox[0]) * 111_320 / step))
-    mid = math.radians((bbox[0] + bbox[2]) / 2)
-    lon_steps = max(1, math.ceil((bbox[3] - bbox[1]) * 111_320 * math.cos(mid) / step))
-    for i in range(lat_steps):
-        for j in range(lon_steps):
-            yield (bbox[0] + (i + 0.5) * (bbox[2] - bbox[0]) / lat_steps,
-                   bbox[1] + (j + 0.5) * (bbox[3] - bbox[1]) / lon_steps)
-
-
-def fetch_bus_stops_google(bbox, gmaps_key, lang="he", radius_m=800, max_calls=40) -> pd.DataFrame:
-    """Google Places (New) Nearby Search for bus stops over a grid covering bbox."""
-    stops = []
-    for n, (lat, lon) in enumerate(_grid_centers(bbox, radius_m)):
-        if n >= max_calls:
-            break
-        try:
-            res = requests.post(
-                "https://places.googleapis.com/v1/places:searchNearby",
-                headers={"X-Goog-Api-Key": gmaps_key,
-                         "X-Goog-FieldMask": "places.id,places.displayName,places.location"},
-                json={"includedTypes": ["bus_stop", "bus_station"], "maxResultCount": 20,
-                      "languageCode": lang,
-                      "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lon},
-                                                         "radius": float(radius_m)}}},
-                timeout=10,
-            ).json()
-        except (requests.RequestException, ValueError):
-            continue
-        for p in res.get("places", []):
-            stops.append({"stop_id": f"g:{p['id']}", "name": p.get("displayName", {}).get("text", "Bus stop"),
-                          "lat": p["location"]["latitude"], "lon": p["location"]["longitude"]})
-    return pd.DataFrame(stops, columns=STOP_COLS)
+def fetch_bus_stops_osm(bbox, lang="he", cache_dir=None) -> pd.DataFrame:
+    """Bus stops in bbox. With cache_dir, every successful fetch is saved to disk
+    and reused when Overpass is down (stops rarely change), including for any
+    bbox that lies inside an already-cached one."""
+    from pathlib import Path
+    cache = Path(cache_dir) if cache_dir else None
+    fresh = _overpass_stops(bbox, lang)
+    if fresh is not None and not fresh.empty:
+        if cache:
+            cache.mkdir(parents=True, exist_ok=True)
+            name = "_".join(f"{x:.5f}" for x in bbox) + f"_{lang}.csv"
+            fresh.to_csv(cache / name, index=False)
+        return fresh
+    if cache and cache.exists():
+        for f in sorted(cache.glob(f"*_{lang}.csv")):
+            try:
+                cb = tuple(float(x) for x in f.stem.split("_")[:4])
+            except ValueError:
+                continue
+            if cb[0] <= bbox[0] and cb[1] <= bbox[1] and cb[2] >= bbox[2] and cb[3] >= bbox[3]:
+                df = pd.read_csv(f, dtype={"stop_id": str})
+                return df[(df.lat.between(bbox[0], bbox[2])) & (df.lon.between(bbox[1], bbox[3]))].reset_index(drop=True)
+    return fresh if fresh is not None else pd.DataFrame(columns=STOP_COLS)
 
 
 def merge_stops(frames, dedupe_m=20) -> pd.DataFrame:
@@ -382,120 +335,119 @@ def merge_stops(frames, dedupe_m=20) -> pd.DataFrame:
     return df.iloc[keep].reset_index(drop=True)
 
 
-# ---------------------------------------------------------------- walking distances
+# ---------------------------------------------------------------- free OSRM routing
 
-def _wp(lat, lon):
-    return {"waypoint": {"location": {"latLng": {"latitude": float(lat), "longitude": float(lon)}}}}
-
-
-def _google_walk_block(origins, dests, key):
-    """Routes API computeRouteMatrix (the legacy Distance Matrix API is often
-    not enabled on new keys)."""
-    r = requests.post(
-        "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
-        headers={"X-Goog-Api-Key": key,
-                 "X-Goog-FieldMask": "originIndex,destinationIndex,distanceMeters,condition"},
-        json={"origins": [_wp(*o) for o in origins], "destinations": [_wp(*d) for d in dests],
-              "travelMode": "WALK"},
-        timeout=20,
-    )
-    out = np.full((len(origins), len(dests)), np.nan)
-    if not r.ok:
-        return out
-    for el in r.json():
-        if el.get("condition") == "ROUTE_EXISTS" and "distanceMeters" in el:
-            out[el.get("originIndex", 0), el.get("destinationIndex", 0)] = el["distanceMeters"]
-    return out
+def _osrm_get(bases, service, coords, params, timeout=40):
+    """GET {base}/{service}/v1/driving/{lon,lat;...} against each base in turn."""
+    locs = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in coords)
+    for base in bases:
+        try:
+            r = requests.get(f"{base}/{service}/v1/driving/{locs}", params=params,
+                             headers=NOMINATIM_HEADERS, timeout=timeout)
+            res = r.json()
+            if res.get("code") == "Ok":
+                return res
+        except (requests.RequestException, ValueError):
+            continue
+    return None
 
 
-def walking_matrix(p_coords, s_coords, max_walk_m, gmaps_key="", min_candidates=3):
-    """passengers x stops walking distance (m). Starts from air distance x detour
-    factor; with a key, replaces it with real Google walking distance for every
-    stop within max_walk by air (walk ≥ air, so farther stops can't qualify),
-    plus each passenger's few nearest stops so far-away homes still get a real
-    number."""
+def _osrm_table(bases, src, dst, extra=None):
+    """Distance table src x dst (meters) in one request (len(src)+len(dst) ≤ 100).
+    extra: per-coordinate params dict of lists (e.g. approaches/bearings) over src+dst."""
+    coords = list(src) + list(dst)
+    params = {"annotations": "distance",
+              "sources": ";".join(str(i) for i in range(len(src))),
+              "destinations": ";".join(str(len(src) + j) for j in range(len(dst)))}
+    for k, vals in (extra or {}).items():
+        params[k] = ";".join(vals)
+    res = _osrm_get(bases, "table", coords, params)
+    if res is None:
+        return None
+    m = np.array([[np.nan if v is None else v for v in row] for row in res["distances"]], float)
+    return m
+
+
+def _foot_table(src, dst):
+    return _osrm_table(FOOT_ROUTERS, src, dst)
+
+
+def walking_matrix(p_coords, s_coords, max_walk_m, min_candidates=3):
+    """passengers x stops real walking distance (m) from the free FOSSGIS foot
+    router, for every stop within max_walk by air of some passenger (walking ≥ air,
+    so farther stops can't qualify) plus each passenger's few nearest stops.
+    Everything else stays at air distance x detour factor."""
     p_coords, s_coords = np.asarray(p_coords, float), np.asarray(s_coords, float)
     air = haversine_matrix(p_coords, s_coords)
     mat = air * WALK_DETOUR_FACTOR
-    if not gmaps_key or len(s_coords) == 0:
+    if len(s_coords) == 0 or len(p_coords) == 0:
         return mat
-    for i in range(len(p_coords)):
-        cand = np.where(air[i] <= max_walk_m)[0]
-        if len(cand) == 0:  # nobody in range: get real numbers for the nearest few
-            cand = np.argsort(air[i])[:min_candidates]
-        cand = cand[np.argsort(air[i, cand])][:GOOGLE_DM_MAX_DESTS]
-        try:
-            block = _google_walk_block(p_coords[i:i + 1], s_coords[cand], gmaps_key)
-        except (requests.RequestException, ValueError):
-            continue
-        got = ~np.isnan(block[0])
-        mat[i, cand[got]] = block[0, got]
+    cand = (air <= max_walk_m)
+    cand[np.arange(len(air))[:, None], np.argsort(air, axis=1)[:, :min_candidates]] = True
+    cols = np.where(cand.any(axis=0))[0]
+    p_step, s_step = 25, OSRM_MAX_COORDS - 25
+    for i in range(0, len(p_coords), p_step):
+        rows = np.arange(i, min(i + p_step, len(p_coords)))
+        need = cols[cand[np.ix_(rows, cols)].any(axis=0)]
+        for j in range(0, len(need), s_step):
+            cs = need[j:j + s_step]
+            block = _foot_table([tuple(x) for x in p_coords[rows]], [tuple(x) for x in s_coords[cs]])
+            if block is None:
+                continue
+            ok = ~np.isnan(block)
+            sub = mat[np.ix_(rows, cs)]
+            sub[ok] = block[ok]
+            mat[np.ix_(rows, cs)] = sub
     return mat
 
 
-def _osrm_table(pts, curb=False):
-    locs = ";".join(f"{lon},{lat}" for lat, lon in pts)
-    params = {"annotations": "distance"}
-    if curb:  # arrive with the stop on the bus's right (Israel drives on the right)
-        params["approaches"] = ";".join(["curb"] * len(pts))
-    try:
-        res = requests.get(f"https://router.project-osrm.org/table/v1/driving/{locs}",
-                           params=params, timeout=30).json()
-    except (requests.RequestException, ValueError):
+def walking_path(home, stop):
+    """Actual walking route home→stop as [(lat, lon), ...], or None."""
+    res = _osrm_get(FOOT_ROUTERS, "route", [home, stop], {"overview": "full", "geometries": "geojson"})
+    if not res:
         return None
-    if res.get("code") != "Ok":
+    return [(lat, lon) for lon, lat in res["routes"][0]["geometry"]["coordinates"]]
+
+
+def _bearing_param(h):
+    return "" if h is None else f"{int(round(h)) % 360},45"
+
+
+def stop_heading(stop):
+    """Direction (deg) a bus faces when it pulls into this stop kerb-side (stop on
+    its right — Israel drives on the right), from the last leg of a free OSRM car
+    route to it."""
+    origin = (stop[0] + 0.006, stop[1] + 0.006)
+    res = _osrm_get(CAR_ROUTERS, "route", [origin, stop],
+                    {"overview": "full", "geometries": "geojson", "approaches": "unrestricted;curb"})
+    if not res:
         return None
-    m = np.array(res["distances"], dtype=float)
-    return None if np.isnan(m).any() else m
+    path = [(lat, lon) for lon, lat in res["routes"][0]["geometry"]["coordinates"]]
+    for k in range(len(path) - 1, 0, -1):
+        if haversine_matrix([path[k - 1]], [path[k]])[0, 0] >= 3:
+            return bearing(path[k - 1], path[k])
+    return None
 
 
-def _origin_wp(o, heading=None):
-    w = _wp(*o)
-    if heading is not None:
-        # bus leaves the stop facing the way it arrived — turning back must be driven
-        w["waypoint"]["location"]["heading"] = int(round(heading)) % 360
-    return w
-
-
-def _google_drive_block(origins, dests, key, origin_headings=None):
-    hs = origin_headings or [None] * len(origins)
-    r = requests.post(
-        "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
-        headers={"X-Goog-Api-Key": key,
-                 "X-Goog-FieldMask": "originIndex,destinationIndex,distanceMeters,condition"},
-        json={"origins": [_origin_wp(o, h) for o, h in zip(origins, hs)],
-              # sideOfRoad: arrive on the stop's side, so no U-turn to reach the far-side stop
-              "destinations": [{"waypoint": {**_wp(*d)["waypoint"], "sideOfRoad": True}} for d in dests],
-              "travelMode": "DRIVE"},
-        timeout=30,
-    )
-    out = np.full((len(origins), len(dests)), np.nan)
-    if r.ok:
-        for el in r.json():
-            if el.get("condition") == "ROUTE_EXISTS" and "distanceMeters" in el:
-                out[el.get("originIndex", 0), el.get("destinationIndex", 0)] = el["distanceMeters"]
-    return out
-
-
-def driving_matrix(pts, gmaps_key="", road_factor=1.4, headings=None, free_only=False):
-    """Square road-distance matrix (meters, asymmetric). Google Routes (25x25
-    blocks) → OSRM table → air distance x road_factor, filling gaps per cell."""
+def driving_matrix(pts, road_factor=1.4, headings=None):
+    """Square road-distance matrix (meters, asymmetric) from the free OSRM car
+    router. Every point is approached kerb-side; points with a heading are also
+    snapped to the road direction they face (bearing ±45°), so a bus leaves a stop
+    going forward and turning back costs real distance. Falls back to air x factor."""
     pts = [tuple(map(float, p)) for p in pts]
+    n = len(pts)
+    m = np.full((n, n), np.nan)
+    hs = list(headings) if headings is not None else [None] * n
+    half = OSRM_MAX_COORDS // 2
+    for i in range(0, n, half):
+        for j in range(0, n, half):
+            si, dj = list(range(i, min(i + half, n))), list(range(j, min(j + half, n)))
+            idx = si + dj
+            extra = {"approaches": ["curb"] * len(idx), "bearings": [_bearing_param(hs[k]) for k in idx]}
+            block = _osrm_table(CAR_ROUTERS, [pts[k] for k in si], [pts[k] for k in dj], extra)
+            if block is not None:
+                m[np.ix_(si, dj)] = block
     fallback = haversine_matrix(pts, pts) * road_factor
-    m = np.full_like(fallback, np.nan)
-    if gmaps_key and not free_only:
-        for i in range(0, len(pts), 25):
-            for j in range(0, len(pts), 25):
-                try:
-                    m[i:i + 25, j:j + 25] = _google_drive_block(
-                        pts[i:i + 25], pts[j:j + 25], gmaps_key,
-                        headings[i:i + 25] if headings is not None else None)
-                except (requests.RequestException, ValueError):
-                    pass
-    if np.isnan(m).any() and len(pts) <= 100:
-        osrm = _osrm_table(pts, curb=True)
-        if osrm is not None:
-            m = np.where(np.isnan(m), osrm, m)
     m = np.where(np.isnan(m), fallback, m)
     np.fill_diagonal(m, 0)
     return m
@@ -636,42 +588,21 @@ def solve_vrp(stops, dest, origin, num_routes, demands, capacity=None, time_limi
     return routes
 
 
-def _stop_wp(c, heading):
-    # Google rejects heading + sideOfRoad together; a heading already fixes the side.
-    w = _wp(*c)["waypoint"]
-    if heading is None:
-        return {**w, "sideOfRoad": True}
-    w["location"]["heading"] = int(round(heading)) % 360
-    return w
-
-
-def get_road_geometry(coords_list, gmaps_key="", headings=None):
+def get_road_geometry(coords_list, headings=None):
+    """Driving line through the points (free OSRM). Stops are approached kerb-side
+    and, when a heading is known, entered/left facing that way."""
     if len(coords_list) < 2:
         return list(coords_list)
-    hs = list(headings) if headings is not None else [None] * len(coords_list)
-    if gmaps_key and len(coords_list) <= 27:  # Routes API: ≤25 intermediates
-        try:
-            r = requests.post(
-                "https://routes.googleapis.com/directions/v2:computeRoutes",
-                headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
-                json={"origin": _stop_wp(coords_list[0], hs[0]) if hs[0] is not None else _wp(*coords_list[0])["waypoint"],
-                      "destination": _wp(*coords_list[-1])["waypoint"],
-                      "intermediates": [_stop_wp(c, h) for c, h in zip(coords_list[1:-1], hs[1:-1])],
-                      "travelMode": "DRIVE"},
-                timeout=15,
-            )
-            if r.ok and r.json().get("routes"):
-                return decode_polyline(r.json()["routes"][0]["polyline"]["encodedPolyline"])
-        except (requests.RequestException, ValueError, KeyError):
-            pass
-    locs = ";".join(f"{lon},{lat}" for lat, lon in coords_list)
-    try:
-        res = requests.get(f"https://router.project-osrm.org/route/v1/driving/{locs}",
-                           params={"overview": "full", "geometries": "geojson"}, timeout=10).json()
-        if res.get("code") == "Ok":
-            return [(lat, lon) for lon, lat in res["routes"][0]["geometry"]["coordinates"]]
-    except (requests.RequestException, ValueError):
-        pass
+    n = len(coords_list)
+    hs = list(headings) if headings is not None else [None] * n
+    approaches = ["unrestricted"] + ["curb"] * (n - 2) + ["unrestricted"]
+    params = {"overview": "full", "geometries": "geojson", "approaches": ";".join(approaches),
+              "bearings": ";".join(_bearing_param(h) for h in hs)}
+    res = _osrm_get(CAR_ROUTERS, "route", coords_list, params)
+    if res is None:  # retry without constraints rather than draw straight lines
+        res = _osrm_get(CAR_ROUTERS, "route", coords_list, {"overview": "full", "geometries": "geojson"})
+    if res:
+        return [(lat, lon) for lon, lat in res["routes"][0]["geometry"]["coordinates"]]
     return list(coords_list)
 
 
@@ -681,38 +612,6 @@ def search_passengers(df, query):
     q = query.strip()
     return df[df["name"].astype(str).str.contains(q, case=False, regex=False, na=False)
               | df["address"].astype(str).str.contains(q, case=False, regex=False, na=False)]
-
-
-def walking_path(home, stop, gmaps_key):
-    """Actual walking route home→stop as [(lat, lon), ...], or None."""
-    if not gmaps_key:
-        return None
-    try:
-        r = requests.post(
-            "https://routes.googleapis.com/directions/v2:computeRoutes",
-            headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
-            json={"origin": _wp(*home)["waypoint"], "destination": _wp(*stop)["waypoint"], "travelMode": "WALK"},
-            timeout=15,
-        )
-        if r.ok and r.json().get("routes"):
-            return decode_polyline(r.json()["routes"][0]["polyline"]["encodedPolyline"])
-    except (requests.RequestException, ValueError, KeyError):
-        pass
-    return None
-
-
-def google_tile_session(gmaps_key, lang="he", referer=None):
-    """Session token for Google Map Tiles API (2D roadmap); None if unavailable.
-    referer: the app's URL — needed when the key is restricted to that website."""
-    try:
-        r = requests.post("https://tile.googleapis.com/v1/createSession", params={"key": gmaps_key},
-                          headers={"Referer": referer} if referer else None,
-                          json={"mapType": "roadmap", "language": f"{lang}-IL", "region": "IL"}, timeout=10)
-        if r.ok:
-            return r.json().get("session")
-    except (requests.RequestException, ValueError):
-        pass
-    return None
 
 
 def improve_stops_for_route(routes, walk, M, dest_idx, max_walk_m, start_idx=None, max_iter=100):
@@ -756,46 +655,19 @@ def improve_stops_for_route(routes, walk, M, dest_idx, max_walk_m, start_idx=Non
     return routes, changed
 
 
-def stop_heading(stop, gmaps_key, approach_from=None):
-    """Direction (deg) a bus faces when it pulls into this stop on the stop's side
-    of the road (sideOfRoad), taken from the last leg of a Google route to it."""
-    if not gmaps_key:
-        return None
-    origin = approach_from or (stop[0] + 0.01, stop[1] + 0.01)
-    try:
-        r = requests.post(
-            "https://routes.googleapis.com/directions/v2:computeRoutes",
-            headers={"X-Goog-Api-Key": gmaps_key, "X-Goog-FieldMask": "routes.polyline.encodedPolyline"},
-            json={"origin": _wp(*origin)["waypoint"],
-                  "destination": {**_wp(*stop)["waypoint"], "sideOfRoad": True},
-                  "travelMode": "DRIVE"},
-            timeout=15,
-        )
-        if not (r.ok and r.json().get("routes")):
-            return None
-        path = decode_polyline(r.json()["routes"][0]["polyline"]["encodedPolyline"])
-    except (requests.RequestException, ValueError, KeyError):
-        return None
-    # last segment of at least a few metres
-    for k in range(len(path) - 1, 0, -1):
-        if haversine_matrix([path[k - 1]], [path[k]])[0, 0] >= 3:
-            return bearing(path[k - 1], path[k])
-    return None
-
-
 def plan_routes(passengers, stops, walk, dest, origin, num_routes, max_walk_m,
-                gmaps_key="", capacity=None, heading_fn=None, swap_rounds=3):
+                capacity=None, heading_fn=None, swap_rounds=3):
     """Full planning pipeline shared by the app and offline evaluation.
 
     1. pool = stops some kid can reach within max_walk; greedy stop selection.
-    2. Route-aware swap on a free OSRM kerb-side matrix (cheap screening).
-    3. Final stops: arrival heading per stop (Google), heading-aware Google
-       driving matrix, final VRP — buses leave stops facing forward, so turning
-       back costs real distance and U-turn routes lose.
+    2. Route-aware swap on a kerb-side road matrix over the pool.
+    3. Final stops: arrival heading per stop, heading-aware road matrix, final
+       VRP — buses leave stops facing forward, so turning back costs real
+       distance and U-turn routes lose. All routing is free OSRM.
     Returns (selected_stops_df, passengers_df, routes, headings) where routes is a
     list of lists of row indices into selected_stops_df, in visiting order.
     """
-    heading_fn = heading_fn or (lambda xy: stop_heading(xy, gmaps_key))
+    heading_fn = heading_fn or stop_heading
     passengers = passengers.reset_index(drop=True)
     if stops is None or stops.empty or walk is None:
         sel, p = select_optimal_stops(passengers, stops, walk, max_walk_m)
@@ -811,7 +683,7 @@ def plan_routes(passengers, stops, walk, dest, origin, num_routes, max_walk_m,
     if Wp is not None and swap_rounds and len(sel) > 1:
         pxy = list(zip(pool_df.lat, pool_df.lon))
         extra = [dest] + ([origin] if origin else [])
-        M = driving_matrix(pxy + extra, gmaps_key, free_only=True)
+        M = driving_matrix(pxy + extra)
         di, oi = len(pxy), (len(pxy) + 1 if origin else None)
         key = {xy: i for i, xy in enumerate(pxy)}
         cur = [key[xy] for xy in zip(sel.lat, sel.lon)]
@@ -829,8 +701,8 @@ def plan_routes(passengers, stops, walk, dest, origin, num_routes, max_walk_m,
         sel, p = select_optimal_stops(passengers, pool_df.iloc[cur].reset_index(drop=True), Wp[:, cur], max_walk_m)
 
     sxy = list(zip(sel.lat, sel.lon))
-    headings = [heading_fn(xy) for xy in sxy] if gmaps_key else [None] * len(sxy)
+    headings = [heading_fn(xy) for xy in sxy]
     pts = sxy + [dest, origin or dest]
-    D = driving_matrix(pts, gmaps_key, headings=headings + [None, None])
+    D = driving_matrix(pts, headings=headings + [None, None])
     routes = solve_vrp(sxy, dest, origin, num_routes, sel["passengers_count"].tolist(), capacity, dist_matrix=D)
     return sel, p, routes, headings
